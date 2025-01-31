@@ -517,7 +517,7 @@ You can use the commandline to change some defaults:
 ## Future Improvements
 
 - Provide an alternative open-source tessellation table beyond the version derived from Unreal Engine.
-- Adaptive tessellation based on culling results for ray tracing: It might be better to gradually reduce tessellation of invisible objects. Currently the sample does a per-instance decision that is binary and therefore shadows of an invisible object might pop if an object becomes visible. One could fade tessellation rate based on distance to frustum planes for instances outside, and for occluded objects a time-based fading could be used. Alternatively, the sample [on subdivision surface tessellation](https://github.com/NVIDIAGameWorks/RTX-Megageometry) does use occlusion culling information on a per-patch level.
+- Adaptive tessellation based on culling results for ray tracing: It might be better to gradually reduce tessellation of invisible objects. Currently the sample does a per-instance decision that is binary and therefore shadows of an invisible object might pop if an object becomes visible. One could fade tessellation rate based on distance to frustum planes for instances outside, and for occluded objects a time-based fading could be used. Alternatively, the DirectX 12 sample on subdivision surface tessellation does use occlusion culling information on a per-patch level.
 - The tessellation factors are calculated based on the un-displaced vertices to reduce complexity of the sample.
 - EXT_mesh_shader support
 
@@ -531,7 +531,7 @@ You can use the commandline to change some defaults:
 
 ## Building and Running
 
-The new `VK_NV_cluster_acceleration_structure` extension requires new drivers, earliest release on 1/30/2025.
+The new `VK_NV_cluster_acceleration_structure` extension requires new drivers, earliest release version is `572.16` from 1/30/2025.
 The sample should run on older drivers with just rasterization available.
 
 Point cmake to the `vk_tessellated_clusters` directory and for example set the output directory to `/build`.
@@ -560,6 +560,8 @@ We would like to thank [**Epic Games**](https://www.epicgames.com/) for allowing
 that splits triangles recursively, was inspired from how `Unreal Engine 5.4` implements nanite tessellation.
 
 ## Third Party
+
+[meshoptimizer](https://github.com/zeux/meshoptimizer) can be used for as alternative for clusterization, and is always used when the triangles within a cluster are re-ordered to improve triangle strips.
 
 This sample uses [data](/thirdparty/epicgames_tessellation/tessellation_table_epicgames_raw.hpp) derived from `Unreal Engine` which uses its own licensing terms.
 
