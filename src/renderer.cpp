@@ -47,7 +47,6 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
 
   initWriteRayTracingDepthBuffer(res, scene, config);
 
-  srand(2342);
   uint32_t axis    = config.gridConfig;
   size_t   sq      = 1;
   int      numAxis = 0;
@@ -83,7 +82,7 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
   glm::vec3 gridShift;
   glm::mat4 gridRotMatrix;
 
-  std::default_random_engine            rng(std::random_device{}());
+  std::default_random_engine            rng(2342);
   std::uniform_real_distribution<float> randomUnorm(0.0f, 1.0f);
 
   for(size_t i = 0; i < m_renderInstances.size(); i++)

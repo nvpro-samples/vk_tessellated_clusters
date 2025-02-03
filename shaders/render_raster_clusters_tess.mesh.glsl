@@ -227,7 +227,7 @@ void main()
   {
     uvec3 indices = tess_getConfigTriangleVertices(cfg, tri);
     
-    partID = view.visualize == VISUALIZE_TRIANGLES ? triLocal + 1 : partID;
+    partID = view.visualize == VISUALIZE_TRIANGLES ? tri + 1 : partID;
 
     gl_PrimitiveIndicesNV[tri * 3 + 0] = indices.x;
     gl_PrimitiveIndicesNV[tri * 3 + 1] = indices.y;
