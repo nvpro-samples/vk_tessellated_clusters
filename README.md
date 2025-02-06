@@ -3,7 +3,7 @@
 This sample showcases dynamic tessellation with displacement that requires per-frame generation of clusters for ray tracing using `VK_NV_cluster_acceleration_structure`.
 It can also render the content using `VK_NV_mesh_shader`.
 
-Please have a look at the [vk_animated_clusters](https://github.com/nvpro-samples/vk_animated_clusters) sample prior this, to familiarize yourself with the new cluster extension.
+Please have a look at the [vk_animated_clusters](https://github.com/nvpro-samples/vk_animated_clusters) sample prior this, to familiarize yourself with the new cluster extension. The DirectX 12 sample that demonstrates tessellation of OpenSubDiv surfaces can be found at [RTX Mega Geometry](https://github.com/NVIDIA-RTX/RTXMG).
 
 ![image showing adaptive tessellation](docs/adaptive_triangle_tessellation.png)
 
@@ -527,7 +527,7 @@ You can use the commandline to change some defaults:
 ## Future Improvements
 
 - Provide an alternative open-source tessellation table beyond the version derived from Unreal Engine.
-- Adaptive tessellation based on culling results for ray tracing: It might be better to gradually reduce tessellation of invisible objects. Currently the sample does a per-instance decision that is binary and therefore shadows of an invisible object might pop if an object becomes visible. One could fade tessellation rate based on distance to frustum planes for instances outside, and for occluded objects a time-based fading could be used. Alternatively, the DirectX 12 sample on subdivision surface tessellation does use occlusion culling information on a per-patch level.
+- Adaptive tessellation based on culling results for ray tracing: It might be better to gradually reduce tessellation of invisible objects. Currently the sample does a per-instance decision that is binary and therefore shadows of an invisible object might pop if an object becomes visible. One could fade tessellation rate based on distance to frustum planes for instances outside, and for occluded objects a time-based fading could be used. Alternatively, the [DirectX 12 sample](https://github.com/NVIDIA-RTX/RTXMG) on subdivision surface tessellation does use occlusion culling information on a per-patch level.
 - The tessellation factors are calculated based on the un-displaced vertices to reduce complexity of the sample.
 - EXT_mesh_shader support
 
@@ -562,7 +562,7 @@ Other Vulkan samples using the new extensions:
 - https://github.com/nvpro-samples/vk_lod_clusters - provides a sample implementation of a basic cluster-lod based rendering and streaming system.
 - https://github.com/nvpro-samples/vk_partitioned_tlas - New extension to manage incremental TLAS updates.
 
-We also recommend having a look at [NVIDIA GameWorks RTX Mega Geometry (coming soon)](https://github.com/NVIDIAGameWorks/RTX-Megageometry), which demonstrates tessellation of subdivision surfaces in DirectX 12.
+We also recommend having a look at [RTX Mega Geometry](https://github.com/NVIDIA-RTX/RTXMG), which demonstrates tessellation of subdivision surfaces in DirectX 12.
 
 ## Acknowledgements
 
