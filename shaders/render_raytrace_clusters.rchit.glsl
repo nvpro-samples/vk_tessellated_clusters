@@ -231,7 +231,7 @@ void main()
       baseBarycentrics[1] * newBaryWeight.y +
       baseBarycentrics[2] * newBaryWeight.z;
       
-    partID = view.visualize == VISUALIZE_TRIANGLES ? subTriangleID + 1: partID;
+    partID = view.visualize == VISUALIZE_TRIANGLES ? subTriangleID * 3: partID;
       
     partID = triangleID | ((partID | 1) << 8);
   }

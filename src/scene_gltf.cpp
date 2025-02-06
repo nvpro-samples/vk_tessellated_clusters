@@ -310,7 +310,7 @@ bool Scene::loadGLTF(const char* filename)
         continue;
       }
 
-      if(gltfPrim->material->has_displacement)
+      if(gltfPrim->material && gltfPrim->material->has_displacement)
       {
         int textureID = int(gltfPrim->material->displacement.displacementGeometryTexture.texture - data->textures);
         geom.displacement.textureIndex = addTexture(textureID);

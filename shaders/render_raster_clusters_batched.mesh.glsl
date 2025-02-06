@@ -424,7 +424,7 @@ void main()
       
       if (tri < numTotalTriangles) 
       {
-        partID = view.visualize == VISUALIZE_TRIANGLES ? triLocal + 1 : partID; // (((triLocal + 1) << 8) ^ partID)
+        partID = view.visualize == VISUALIZE_TRIANGLES ? triLocal * 3 : partID; // (((triLocal + 1) << 8) ^ partID)
       
         gl_PrimitiveIndicesNV[tri * 3 + 0] = indices.x + vertexStart;
         gl_PrimitiveIndicesNV[tri * 3 + 1] = indices.y + vertexStart;

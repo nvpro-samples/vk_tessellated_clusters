@@ -37,13 +37,19 @@ uint32_t vertices[] = {
     // each vertex is stored as uint32_t, a UV coordinate is packed in pairs of 16-bit values
     // 0 = 0.0f
     // 1 << 15 == 1.0f
+
+    // the first non-subdivided triangle's UVs are:
+    // (0,0),     (1,0),     (0,1) and stored as:
+    // 0x00000000,0x00008000,0x80000000
     ...
 };
 uint32_t max_triangles = ...; // total number of triangles across all subdivision patterns
 uint32_t triangles[] = {
     // each triangle is stored packed in a single uint32_t, where the
-    // first 24 bits store 3 x 8 bit vertex indices and the top 8 bits are unused.
+    // first 24 bits store 3 x 8 bit counter-clockwise vertex indices and the top 8 bits are unused.
     // The vertex indices are relative to the config's `firstVertex`, see later.
+
+    // the first triangle indices are [0,1,2] stored as 0x00020100
     ...
 };
 uint32_t max_configs = ...; // sum of all tessellation configs
@@ -77,6 +83,10 @@ uint16_t configs[] = {
 // config: 8 - 3, 3, 2
 // config: 9 - 3, 3, 3
 // ...
+
+// Caveat: for the TRANSIENT2X optimization to work (see later)
+// all configs <= 2,2,2 must have <= TESS_2X_MINI_TRIANGLES (4)
+//                            and <= TESS_2X_MINI_VERTICES (6)
 
 } // namespace tessellation_table
 ```
