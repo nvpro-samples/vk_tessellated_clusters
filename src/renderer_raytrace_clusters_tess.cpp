@@ -900,8 +900,8 @@ void RendererRayTraceClustersTess::initRayTracingPipeline(Resources& res)
 
   // new for clusters
   {
-    pipelineInfo.pNext                              = &pipeClusters;
-    pipeClusters.allowClusterAccelerationStructures = true;
+    pipelineInfo.pNext                             = &pipeClusters;
+    pipeClusters.allowClusterAccelerationStructure = true;
   }
 
   VkResult result = vkCreateRayTracingPipelinesKHR(res.m_device, {}, {}, 1, &pipelineInfo, nullptr, &p.plines[0]);

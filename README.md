@@ -534,7 +534,7 @@ You can use the commandline to change some defaults:
 ## Limitations
 
 * Facet shading is enforced when tessellation is active. Smooth normals are not available, as the sample doesn't do procedural perturbation of normals matching the displacement effect, nor does it have support for deformed normal maps when displacement maps are used. 
-* The `ClusterID` can only be accessed in shaders using  `gl_ClusterIDNV` after enabling `VkRayTracingPipelineClusterAccelerationStructureCreateInfoNV::allowClusterAccelerationStructures` for that pipeline. We use `GL_EXT_spirv_intrinsics` rather than dedicated GLSL extension support that may come at later time.
+* The `ClusterID` can only be accessed in shaders using  `gl_ClusterIDNV` after enabling `VkRayTracingPipelineClusterAccelerationStructureCreateInfoNV::allowClusterAccelerationStructure` for that pipeline. We use `GL_EXT_spirv_intrinsics` rather than dedicated GLSL extension support that may come at later time.
 * Few error checks are performed on out of memory situations, which can happen on higher _"render copies"_ values, or the complexity of the loaded scene
 * If the cluster library generates clusters > 256 vertices, scene loading will fail. This should be addressed in future versions.
 * The number of threads used in the persistent kernel is basd on a crude heuristic for now and was not evaluated to be the optimal amount.
