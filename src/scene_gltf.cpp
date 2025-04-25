@@ -407,17 +407,14 @@ bool Scene::loadGLTF(const char* filename)
         }
       }
 
-
-      offsetVertices += numVertices;
-
       // indices
       {
         const cgltf_accessor* accessor = gltfPrim->indices;
 
         uint32_t* writeIndices = (uint32_t*)(geom.triangles.data() + offsetTriangles);
 
-        if(accessor->component_type == cgltf_component_type_r_32u && accessor->type == cgltf_type_scalar
-           && accessor->stride == sizeof(uint32_t))
+        if(offsetVertices == 0 && accessor->component_type == cgltf_component_type_r_32u
+           && accessor->type == cgltf_type_scalar && accessor->stride == sizeof(uint32_t))
         {
           memcpy(writeIndices, cgltf_buffer_view_data(accessor->buffer_view) + accessor->offset,
                  sizeof(uint32_t) * accessor->count);
@@ -426,12 +423,15 @@ bool Scene::loadGLTF(const char* filename)
         {
           for(size_t i = 0; i < accessor->count; i++)
           {
-            writeIndices[i] = (uint32_t)cgltf_accessor_read_index(gltfPrim->indices, i);
+            writeIndices[i] = (uint32_t)cgltf_accessor_read_index(gltfPrim->indices, i) + offsetVertices;
           }
         }
 
         offsetTriangles += (uint32_t)accessor->count / 3;
       }
+
+
+      offsetVertices += numVertices;
     }
   }
 
