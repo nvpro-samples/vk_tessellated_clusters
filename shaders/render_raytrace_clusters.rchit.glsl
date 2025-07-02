@@ -286,7 +286,7 @@ void main()
         ambientOcclusion(wPos, wNrm, view.ambientOcclusionSamples, view.ambientOcclusionRadius * view.sceneSize);
 
     float sunContribution  = 1.0;
-    vec3  directionToLight = view.skyParams.directionToLight;
+    vec3  directionToLight = view.skyParams.sunDirection;
     if(view.doShadow == 1)
       sunContribution = traceShadowRay(wPos, directionToLight);
 

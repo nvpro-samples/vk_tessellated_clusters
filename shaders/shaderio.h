@@ -23,7 +23,7 @@
 #include "shaderio_core.h"
 #include "shaderio_scene.h"
 #include "shaderio_building.h"
-#include "dh_sky.h"
+#include "nvshaders/sky_io.h.slang"
 
 /////////////////////////////////////////
 
@@ -165,7 +165,7 @@
 #ifdef __cplusplus
 namespace shaderio {
 using namespace glm;
-using namespace nvvkhl_shaders;
+
 #endif
 
 struct FrameConstants
@@ -246,7 +246,7 @@ struct FrameConstants
   uint  visFilterInstanceID;
   uint  visFilterClusterID;
 
-  SimpleSkyParameters skyParams;
+  SkySimpleParameters skyParams;
 };
 
 struct Readback

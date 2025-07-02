@@ -19,7 +19,14 @@
 
 #pragma once
 
+#if __INTELLISENSE__
+#undef VK_NO_PROTOTYPES
+#endif
+
 #include <memory>
+
+#include <nvvk/acceleration_structures.hpp>
+#include <nvvk/compute_pipeline.hpp>
 
 #include "resources.hpp"
 #include "scene.hpp"
@@ -32,6 +39,9 @@ struct RendererConfig
   uint32_t  gridConfig     = 3;
   glm::vec3 refShift       = glm::vec3(1, 1, 1);
 
+  bool debugVisualization  = true;
+  bool doAnimation         = false;
+  bool doCulling           = false;
   bool flipWinding         = false;
   bool pnDisplacement      = true;
   bool transientClusters1X = true;
@@ -58,6 +68,12 @@ struct RendererConfig
 class Renderer
 {
 public:
+  virtual bool init(Resources& res, Scene& scene, const RendererConfig& config) = 0;
+  virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler) = 0;
+  virtual void deinit(Resources& res) = 0;
+  virtual ~Renderer() {};  // Defined only so that inherited classes also have virtual destructors. Use deinit().
+  virtual void updatedFrameBuffer(Resources& res) { updateBasicDescriptors(res); };
+
   struct ResourceUsageInfo
   {
     size_t rtTlasMemBytes{};
@@ -82,55 +98,56 @@ public:
     }
   };
 
-  virtual bool init(Resources& res, Scene& scene, const RendererConfig& config) = 0;
-  virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler) = 0;
-  virtual void deinit(Resources& res) = 0;
-  virtual ~Renderer(){};  // Defined only so that inherited classes also have virtual destructors. Use deinit().
-  virtual void updatedFrameBuffer(Resources& res) { updatedFrameBufferBasics(res); };
-
-  virtual bool supportsClusters() const { return true; }
-
   inline ResourceUsageInfo getResourceUsage(bool reserved) const
   {
     return reserved ? m_resourceReservedUsage : m_resourceActualUsage;
   };
 
 protected:
-  bool initBasicShaders(Resources& res, Scene& scene, const RendererConfig& config);
   void initBasics(Resources& res, Scene& scene, const RendererConfig& config);
   void deinitBasics(Resources& res);
 
-  void updatedFrameBufferBasics(Resources& res);
+  bool initBasicShaders(Resources& res, Scene& scene, const RendererConfig& config);
+  void initBasicPipelines(Resources& res, Scene& scene, const RendererConfig& config);
+  void updateBasicDescriptors(Resources& res);
 
   void initRayTracingTlas(Resources& res, Scene& scene, const RendererConfig& config, const VkAccelerationStructureKHR* blas = nullptr);
   void updateRayTracingTlas(VkCommandBuffer cmd, Resources& res, Scene& scene, bool update = false);
   void deinitRayTracingTlas(Resources& res);
 
-  void initWriteRayTracingDepthBuffer(Resources& res, Scene& scene, const RendererConfig& config);
   void writeRayTracingDepthBuffer(VkCommandBuffer cmd);
+  void writeBackgroundSky(VkCommandBuffer cmd);
 
   struct BasicShaders
   {
-    nvvk::ShaderModuleID fullScreenVertexShader;
-    nvvk::ShaderModuleID fullscreenWriteDepthFragShader;
+    shaderc::SpvCompilationResult fullScreenVertexShader;
+    shaderc::SpvCompilationResult fullscreenWriteDepthFragShader;
+    shaderc::SpvCompilationResult fullscreenBackgroundFragShader;
   };
 
-  BasicShaders m_basicShaders;
+  struct BasicPipelines
+  {
+    VkPipeline writeDepth{};
+    VkPipeline background{};
+  };
+
+  BasicShaders   m_basicShaders;
+  BasicPipelines m_basicPipelines;
 
   std::vector<shaderio::RenderInstance> m_renderInstances;
-  RBuffer                               m_renderInstanceBuffer;
+  nvvk::Buffer                          m_renderInstanceBuffer;
 
-  RBuffer                                     m_tlasInstancesBuffer;
-  VkAccelerationStructureGeometryKHR          m_tlasGeometry;
-  VkAccelerationStructureBuildGeometryInfoKHR m_tlasBuildInfo;
-  RBuffer                                     m_tlasScratchBuffer;
-  nvvk::AccelKHR                              m_tlas;
+  nvvk::Buffer                                m_tlasInstancesBuffer;
+  VkAccelerationStructureGeometryKHR          m_tlasGeometry{};
+  VkAccelerationStructureBuildGeometryInfoKHR m_tlasBuildInfo{};
+  nvvk::Buffer                                m_tlasScratchBuffer;
+  nvvk::AccelerationStructure                 m_tlas;
 
   ResourceUsageInfo m_resourceReservedUsage{};
   ResourceUsageInfo m_resourceActualUsage{};
 
-  nvvk::DescriptorSetContainer m_writeDepthBufferDsetContainer;
-  VkPipeline                   m_writeDepthBufferPipeline = nullptr;
+  nvvk::DescriptorPack m_basicDset;
+  VkPipelineLayout     m_basicPipelineLayout{};
 };
 
 //////////////////////////////////////////////////////////////////////////

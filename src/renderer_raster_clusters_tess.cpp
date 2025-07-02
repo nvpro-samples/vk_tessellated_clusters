@@ -17,12 +17,12 @@
 * SPDX-License-Identifier: Apache-2.0
 */
 
-#include <nvh/misc.hpp>
-#include <nvh/alignment.hpp>
+#include <nvutils/alignment.hpp>
+#include <fmt/format.h>
 
 #include "renderer.hpp"
 #include "tessellation_table.hpp"
-#include "shaders/shaderio.h"
+#include "../shaders/shaderio.h"
 
 namespace tessellatedclusters {
 
@@ -30,7 +30,7 @@ class RendererRasterClustersTess : public Renderer
 {
 public:
   virtual bool init(Resources& res, Scene& scene, const RendererConfig& config) override;
-  virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler) override;
+  virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler) override;
   virtual void updatedFrameBuffer(Resources& res) override;
   virtual void deinit(Resources& res) override;
 
@@ -39,42 +39,44 @@ private:
 
   struct Shaders
   {
-    nvvk::ShaderModuleID meshShaderFull;
-    nvvk::ShaderModuleID meshShaderTess;
-    nvvk::ShaderModuleID meshShaderTessBatched;
-    nvvk::ShaderModuleID taskShaderTessBatched;
-    nvvk::ShaderModuleID fragmentShader;
+    shaderc::SpvCompilationResult meshShaderFull;
+    shaderc::SpvCompilationResult meshShaderTess;
+    shaderc::SpvCompilationResult meshShaderTessBatched;
+    shaderc::SpvCompilationResult taskShaderTessBatched;
+    shaderc::SpvCompilationResult fragmentShader;
 
-    nvvk::ShaderModuleID computeInstancesClassify;
+    shaderc::SpvCompilationResult computeInstancesClassify;
 
-    nvvk::ShaderModuleID computeClustersCull;
-    nvvk::ShaderModuleID computeClusterClassify;
-    nvvk::ShaderModuleID computeTriangleSplit;
+    shaderc::SpvCompilationResult computeClustersCull;
+    shaderc::SpvCompilationResult computeClusterClassify;
+    shaderc::SpvCompilationResult computeTriangleSplit;
 
-    nvvk::ShaderModuleID computeBuildSetup;
+    shaderc::SpvCompilationResult computeBuildSetup;
   };
 
   struct Pipelines
   {
-    VkPipeline graphicsMeshFull         = nullptr;
-    VkPipeline graphicsMeshTess         = nullptr;
-    VkPipeline computeTriangleSplit     = nullptr;
-    VkPipeline computeClustersCull      = nullptr;
-    VkPipeline computeClusterClassify   = nullptr;
-    VkPipeline computeBuildSetup        = nullptr;
-    VkPipeline computeInstancesClassify = nullptr;
+    VkPipeline graphicsMeshFull         = {};
+    VkPipeline graphicsMeshTess         = {};
+    VkPipeline computeTriangleSplit     = {};
+    VkPipeline computeClustersCull      = {};
+    VkPipeline computeClusterClassify   = {};
+    VkPipeline computeBuildSetup        = {};
+    VkPipeline computeInstancesClassify = {};
   };
 
   RendererConfig m_config;
 
-  Shaders                      m_shaders;
-  VkShaderStageFlags           m_stageFlags;
-  Pipelines                    m_pipelines;
-  nvvk::DescriptorSetContainer m_dsetContainer;
+  Shaders   m_shaders;
+  Pipelines m_pipelines;
 
-  RBuffer                 m_sceneBuildBuffer;
-  RBuffer                 m_sceneDataBuffer;
-  RBuffer                 m_sceneSplitBuffer;
+  VkShaderStageFlags   m_stageFlags{};
+  VkPipelineLayout     m_pipelineLayout{};
+  nvvk::DescriptorPack m_dsetPack;
+
+  nvvk::Buffer            m_sceneBuildBuffer;
+  nvvk::Buffer            m_sceneDataBuffer;
+  nvvk::Buffer            m_sceneSplitBuffer;
   shaderio::SceneBuilding m_sceneBuildShaderio;
 
   TessellationTable m_tessTable;
@@ -82,44 +84,52 @@ private:
 
 bool RendererRasterClustersTess::initShaders(Resources& res, Scene& scene, const RendererConfig& config)
 {
-  std::string prepend;
-  prepend += nvh::stringFormat("#define CLUSTER_VERTEX_COUNT %d\n", shaderio::adjustClusterProperty(scene.m_config.clusterVertices));
-  prepend += nvh::stringFormat("#define CLUSTER_TRIANGLE_COUNT %d\n",
-                               shaderio::adjustClusterProperty(scene.m_config.clusterTriangles));
-  prepend += nvh::stringFormat("#define TESSTABLE_SIZE %d\n", m_tessTable.m_maxSize);
-  prepend += nvh::stringFormat("#define TESSTABLE_LOOKUP_SIZE %d\n", m_tessTable.m_maxSizeConfigs);
-  prepend += nvh::stringFormat("#define TARGETS_RASTERIZATION %d\n", 1);
-  prepend += nvh::stringFormat("#define TESS_RASTER_USE_BATCH %d\n", config.rasterBatchMeshlets ? 1 : 0);
-  prepend += nvh::stringFormat("#define TESS_USE_PN %d\n", config.pnDisplacement ? 1 : 0);
-  prepend += nvh::stringFormat("#define TESS_USE_1X_TRANSIENTBUILDS %d\n", 0);
-  prepend += nvh::stringFormat("#define TESS_USE_2X_TRANSIENTBUILDS %d\n", 0);
-  prepend += nvh::stringFormat("#define TESS_ACTIVE %d\n", 1);
-  prepend += nvh::stringFormat("#define MAX_PART_TRIANGLES %d\n", 1 << config.numPartTriangleBits);
-  prepend += nvh::stringFormat("#define MAX_VISIBLE_CLUSTERS %d\n", 1 << config.numVisibleClusterBits);
-  prepend += nvh::stringFormat("#define MAX_SPLIT_TRIANGLES %d\n", 1 << config.numSplitTriangleBits);
-  prepend += nvh::stringFormat("#define MESHSHADER_WORKGROUP_SIZE %d\n", 32);
-  prepend += nvh::stringFormat("#define HAS_DISPLACEMENT_TEXTURES %d\n", scene.m_textureImages.size() ? 1 : 0);
+  shaderc::CompileOptions options = res.makeCompilerOptions();
 
-  m_shaders.meshShaderFull =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_MESH_BIT_NV, "render_raster_clusters.mesh.glsl", prepend);
-  m_shaders.meshShaderTess =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_MESH_BIT_NV, "render_raster_clusters_tess.mesh.glsl", prepend);
-  m_shaders.meshShaderTessBatched =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_MESH_BIT_NV, "render_raster_clusters_batched.mesh.glsl", prepend);
-  m_shaders.taskShaderTessBatched =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_TASK_BIT_NV, "render_raster_clusters_batched.task.glsl", prepend);
-  m_shaders.fragmentShader =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_FRAGMENT_BIT, "render_raster.frag.glsl", prepend);
-  m_shaders.computeInstancesClassify =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "instances_classify.comp.glsl", prepend);
-  m_shaders.computeClusterClassify =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "cluster_classify.comp.glsl", prepend);
-  m_shaders.computeClustersCull =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "clusters_cull.comp.glsl", prepend);
-  m_shaders.computeTriangleSplit =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "triangle_split.comp.glsl", prepend);
-  m_shaders.computeBuildSetup =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "build_setup.comp.glsl", prepend);
+  uint32_t meshletTriangles = shaderio::adjustClusterProperty(scene.m_maxClusterTriangles);
+  uint32_t meshletVertices  = shaderio::adjustClusterProperty(scene.m_maxClusterVertices);
+  LOGI("mesh shader config: %d triangles %d vertices\n", meshletTriangles, meshletVertices);
+
+  options.AddMacroDefinition("CLUSTER_VERTEX_COUNT", fmt::format("{}", meshletVertices));
+  options.AddMacroDefinition("CLUSTER_TRIANGLE_COUNT", fmt::format("{}", meshletTriangles));
+  options.AddMacroDefinition("TESSTABLE_SIZE", fmt::format("{}", m_tessTable.m_maxSize));
+  options.AddMacroDefinition("TESSTABLE_LOOKUP_SIZE", fmt::format("{}", m_tessTable.m_maxSizeConfigs));
+  options.AddMacroDefinition("TARGETS_RASTERIZATION", "1");
+  options.AddMacroDefinition("TESS_RASTER_USE_BATCH", fmt::format("{}", config.rasterBatchMeshlets ? 1 : 0));
+  options.AddMacroDefinition("TESS_USE_PN", fmt::format("{}", config.pnDisplacement ? 1 : 0));
+  options.AddMacroDefinition("TESS_USE_1X_TRANSIENTBUILDS", "0");
+  options.AddMacroDefinition("TESS_USE_2X_TRANSIENTBUILDS", "0");
+  options.AddMacroDefinition("TESS_ACTIVE", "1");
+  options.AddMacroDefinition("MAX_PART_TRIANGLES", fmt::format("{}", 1 << config.numPartTriangleBits));
+  options.AddMacroDefinition("MAX_VISIBLE_CLUSTERS", fmt::format("{}", 1 << config.numVisibleClusterBits));
+  options.AddMacroDefinition("MAX_SPLIT_TRIANGLES", fmt::format("{}", 1 << config.numSplitTriangleBits));
+  options.AddMacroDefinition("MESHSHADER_WORKGROUP_SIZE", "32");
+  options.AddMacroDefinition("HAS_DISPLACEMENT_TEXTURES", fmt::format("{}", scene.m_textureImages.size() ? 1 : 0));
+  options.AddMacroDefinition("DO_CULLING", fmt::format("{}", config.doCulling ? 1 : 0));
+  options.AddMacroDefinition("DO_ANIMATION", fmt::format("{}", config.doAnimation ? 1 : 0));
+  options.AddMacroDefinition("DEBUG_VISUALIZATION", fmt::format("{}", config.debugVisualization ? 1 : 0));
+
+  res.compileShader(m_shaders.meshShaderFull, VK_SHADER_STAGE_MESH_BIT_NV, "render_raster_clusters.mesh.glsl", &options);
+
+  res.compileShader(m_shaders.meshShaderTess, VK_SHADER_STAGE_MESH_BIT_NV, "render_raster_clusters_tess.mesh.glsl", &options);
+
+  res.compileShader(m_shaders.meshShaderTessBatched, VK_SHADER_STAGE_MESH_BIT_NV,
+                    "render_raster_clusters_batched.mesh.glsl", &options);
+
+  res.compileShader(m_shaders.taskShaderTessBatched, VK_SHADER_STAGE_TASK_BIT_NV,
+                    "render_raster_clusters_batched.task.glsl", &options);
+
+  res.compileShader(m_shaders.fragmentShader, VK_SHADER_STAGE_FRAGMENT_BIT, "render_raster.frag.glsl", &options);
+
+  res.compileShader(m_shaders.computeInstancesClassify, VK_SHADER_STAGE_COMPUTE_BIT, "instances_classify.comp.glsl", &options);
+
+  res.compileShader(m_shaders.computeClusterClassify, VK_SHADER_STAGE_COMPUTE_BIT, "cluster_classify.comp.glsl", &options);
+
+  res.compileShader(m_shaders.computeClustersCull, VK_SHADER_STAGE_COMPUTE_BIT, "clusters_cull.comp.glsl", &options);
+
+  res.compileShader(m_shaders.computeTriangleSplit, VK_SHADER_STAGE_COMPUTE_BIT, "triangle_split.comp.glsl", &options);
+
+  res.compileShader(m_shaders.computeBuildSetup, VK_SHADER_STAGE_COMPUTE_BIT, "build_setup.comp.glsl", &options);
 
   if(!res.verifyShaders(m_shaders))
   {
@@ -145,19 +155,20 @@ bool RendererRasterClustersTess::init(Resources& res, Scene& scene, const Render
 
 
   {
-    m_sceneBuildBuffer = res.createBuffer(sizeof(shaderio::SceneBuilding), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
-                                                                               | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+    res.m_allocator.createBuffer(m_sceneBuildBuffer, sizeof(shaderio::SceneBuilding),
+                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+                                     | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
     size_t offsetVisibles = 0;
     size_t offsetFull =
-        nvh::align_up(offsetVisibles + sizeof(shaderio::ClusterInfo) * uint32_t(1u << config.numVisibleClusterBits), 128);
+        nvutils::align_up(offsetVisibles + sizeof(shaderio::ClusterInfo) * uint32_t(1u << config.numVisibleClusterBits), 128);
     size_t offsetTess =
-        nvh::align_up(offsetFull + sizeof(shaderio::ClusterInfo) * uint32_t(1u << config.numVisibleClusterBits), 128);
+        nvutils::align_up(offsetFull + sizeof(shaderio::ClusterInfo) * uint32_t(1u << config.numVisibleClusterBits), 128);
     size_t offsetInstances =
-        nvh::align_up(offsetTess + sizeof(shaderio::TessTriangleInfo) * uint32_t(1u << config.numPartTriangleBits), 128);
+        nvutils::align_up(offsetTess + sizeof(shaderio::TessTriangleInfo) * uint32_t(1u << config.numPartTriangleBits), 128);
     size_t size = offsetInstances + sizeof(uint32_t) * m_renderInstances.size();
 
-    m_sceneDataBuffer = res.createBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    m_resourceReservedUsage.operationsMemBytes += m_sceneDataBuffer.info.range;
+    res.m_allocator.createBuffer(m_sceneDataBuffer, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    m_resourceReservedUsage.operationsMemBytes += m_sceneDataBuffer.bufferSize;
 
 
     memset(&m_sceneBuildShaderio, 0, sizeof(m_sceneBuildShaderio));
@@ -167,113 +178,118 @@ bool RendererRasterClustersTess::init(Resources& res, Scene& scene, const Render
     m_sceneBuildShaderio.partTriangles      = m_sceneDataBuffer.address + offsetTess;
     m_sceneBuildShaderio.instanceStates     = m_sceneDataBuffer.address + offsetInstances;
 
-    m_sceneSplitBuffer = res.createBuffer(sizeof(shaderio::TessTriangleInfo) * uint32_t(1 << config.numSplitTriangleBits),
-                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    m_resourceReservedUsage.operationsMemBytes += m_sceneSplitBuffer.info.range;
+    res.m_allocator.createBuffer(m_sceneSplitBuffer, sizeof(shaderio::TessTriangleInfo) * uint32_t(1 << config.numSplitTriangleBits),
+                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    m_resourceReservedUsage.operationsMemBytes += m_sceneSplitBuffer.bufferSize;
     m_sceneBuildShaderio.splitTriangles = m_sceneSplitBuffer.address;
   }
 
   {
-    m_dsetContainer.init(res.m_device);
-
     m_stageFlags = VK_SHADER_STAGE_MESH_BIT_NV | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
     if(config.rasterBatchMeshlets)
     {
       m_stageFlags |= VK_SHADER_STAGE_TASK_BIT_NV;
     }
 
-    m_dsetContainer.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_TESSTABLE_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_SCENEBUILDING_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_SCENEBUILDING_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_HIZ_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_TESSTABLE_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_SCENEBUILDING_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_SCENEBUILDING_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_HIZ_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, m_stageFlags);
 
     const uint32_t numDisplacedTextures = uint32_t(scene.m_textureImages.size());
     if(numDisplacedTextures > 0)
     {
-      m_dsetContainer.addBinding(BINDINGS_DISPLACED_TEXTURES, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                 numDisplacedTextures, m_stageFlags);
+      m_dsetPack.bindings.addBinding(BINDINGS_DISPLACED_TEXTURES, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                     numDisplacedTextures, m_stageFlags);
     }
 
-    m_dsetContainer.initLayout();
+    m_dsetPack.initFromBindings(res.m_device);
 
-    VkPushConstantRange pushRange;
-    pushRange.offset     = 0;
-    pushRange.size       = sizeof(uint32_t);
-    pushRange.stageFlags = m_stageFlags;
-    m_dsetContainer.initPipeLayout(1, &pushRange);
+    nvvk::createPipelineLayout(res.m_device, &m_pipelineLayout, {m_dsetPack.layout}, {{m_stageFlags, 0, sizeof(uint32_t)}});
 
-    m_dsetContainer.initPool(1);
-    std::vector<VkWriteDescriptorSet> writeSets;
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_FRAME_UBO, &res.m_common.view.info));
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_TESSTABLE_UBO, &m_tessTable.m_ubo.info));
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_READBACK_SSBO, &res.m_common.readbackDevice.info));
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_RENDERINSTANCES_SSBO, &m_renderInstanceBuffer.info));
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_SCENEBUILDING_SSBO, &m_sceneBuildBuffer.info));
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_SCENEBUILDING_UBO, &m_sceneBuildBuffer.info));
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_HIZ_TEX, &res.m_hizUpdate.farImageInfo));
+    nvvk::WriteSetContainer writeSets;
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_FRAME_UBO), res.m_commonBuffers.frameConstants);
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_TESSTABLE_UBO), m_tessTable.m_ubo);
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_READBACK_SSBO), res.m_commonBuffers.readBack);
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_RENDERINSTANCES_SSBO), m_renderInstanceBuffer);
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_SCENEBUILDING_SSBO), m_sceneBuildBuffer);
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_SCENEBUILDING_UBO), m_sceneBuildBuffer);
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_HIZ_TEX), res.m_hizUpdate.farImageInfo);
 
-    std::vector<VkDescriptorImageInfo> imageInfo;
-    imageInfo.reserve(numDisplacedTextures + writeSets.size());
     if(numDisplacedTextures > 0)
     {
-      for(const nvvk::Texture& texture : scene.m_textureImages)  // All texture samplers
+      std::vector<VkDescriptorImageInfo> imageInfo;
+      imageInfo.reserve(numDisplacedTextures + writeSets.size());
+      for(const nvvk::Image& texture : scene.m_textureImages)
       {
-        imageInfo.emplace_back(texture.descriptor);
+        VkDescriptorImageInfo descriptor = texture.descriptor;
+        descriptor.sampler               = res.m_samplerLinear;
+        imageInfo.emplace_back(descriptor);
       }
-      writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_DISPLACED_TEXTURES, imageInfo.data()));
+      writeSets.append(m_dsetPack.getWriteSet(BINDINGS_DISPLACED_TEXTURES), imageInfo.data());
     }
 
-    vkUpdateDescriptorSets(res.m_device, uint32_t(writeSets.size()), writeSets.data(), 0, nullptr);
+    vkUpdateDescriptorSets(res.m_device, writeSets.size(), writeSets.data(), 0, nullptr);
   }
 
   {
-    nvvk::GraphicsPipelineState     state = res.m_basicGraphicsState;
-    nvvk::GraphicsPipelineGenerator gfxGen(res.m_device, m_dsetContainer.getPipeLayout(),
-                                           res.m_framebuffer.pipelineRenderingInfo, state);
-    state.rasterizationState.frontFace = config.flipWinding ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    gfxGen.addShader(res.m_shaderManager.get(m_shaders.meshShaderFull), VK_SHADER_STAGE_MESH_BIT_NV);
-    gfxGen.addShader(res.m_shaderManager.get(m_shaders.fragmentShader), VK_SHADER_STAGE_FRAGMENT_BIT);
-    m_pipelines.graphicsMeshFull = gfxGen.createPipeline();
+    nvvk::GraphicsPipelineCreator graphicsGen;
+    nvvk::GraphicsPipelineState   graphicsState = res.m_basicGraphicsState;
 
-    gfxGen.clearShaders();
+    graphicsGen.pipelineInfo.layout                  = m_pipelineLayout;
+    graphicsGen.renderingState.depthAttachmentFormat = res.m_frameBuffer.pipelineRenderingInfo.depthAttachmentFormat;
+    graphicsGen.renderingState.stencilAttachmentFormat = res.m_frameBuffer.pipelineRenderingInfo.stencilAttachmentFormat;
+    graphicsGen.colorFormats = {res.m_frameBuffer.colorFormat};
+
+    graphicsState.rasterizationState.frontFace = config.flipWinding ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    graphicsGen.addShader(VK_SHADER_STAGE_MESH_BIT_EXT, "main", nvvkglsl::GlslCompiler::getSpirvData(m_shaders.meshShaderFull));
+    graphicsGen.addShader(VK_SHADER_STAGE_FRAGMENT_BIT, "main", nvvkglsl::GlslCompiler::getSpirvData(m_shaders.fragmentShader));
+
+    graphicsGen.createGraphicsPipeline(res.m_device, nullptr, graphicsState, &m_pipelines.graphicsMeshFull);
+
+    graphicsGen.clearShaders();
     if(config.rasterBatchMeshlets)
     {
-      gfxGen.addShader(res.m_shaderManager.get(m_shaders.taskShaderTessBatched), VK_SHADER_STAGE_TASK_BIT_NV);
-      gfxGen.addShader(res.m_shaderManager.get(m_shaders.meshShaderTessBatched), VK_SHADER_STAGE_MESH_BIT_NV);
-      gfxGen.addShader(res.m_shaderManager.get(m_shaders.fragmentShader), VK_SHADER_STAGE_FRAGMENT_BIT);
+      graphicsGen.addShader(VK_SHADER_STAGE_TASK_BIT_NV, "main",
+                            nvvkglsl::GlslCompiler::getSpirvData(m_shaders.taskShaderTessBatched));
+      graphicsGen.addShader(VK_SHADER_STAGE_MESH_BIT_EXT, "main",
+                            nvvkglsl::GlslCompiler::getSpirvData(m_shaders.meshShaderTessBatched));
+      graphicsGen.addShader(VK_SHADER_STAGE_FRAGMENT_BIT, "main", nvvkglsl::GlslCompiler::getSpirvData(m_shaders.fragmentShader));
     }
     else
     {
-      gfxGen.addShader(res.m_shaderManager.get(m_shaders.meshShaderTess), VK_SHADER_STAGE_MESH_BIT_NV);
-      gfxGen.addShader(res.m_shaderManager.get(m_shaders.fragmentShader), VK_SHADER_STAGE_FRAGMENT_BIT);
+      graphicsGen.addShader(VK_SHADER_STAGE_MESH_BIT_EXT, "main", nvvkglsl::GlslCompiler::getSpirvData(m_shaders.meshShaderTess));
+      graphicsGen.addShader(VK_SHADER_STAGE_FRAGMENT_BIT, "main", nvvkglsl::GlslCompiler::getSpirvData(m_shaders.fragmentShader));
     }
-    m_pipelines.graphicsMeshTess = gfxGen.createPipeline();
+    graphicsGen.createGraphicsPipeline(res.m_device, nullptr, graphicsState, &m_pipelines.graphicsMeshTess);
   }
 
   {
     VkComputePipelineCreateInfo compInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    compInfo.stage                       = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    compInfo.stage.stage                 = VK_SHADER_STAGE_COMPUTE_BIT;
-    compInfo.stage.pName                 = "main";
-    compInfo.layout                      = m_dsetContainer.getPipeLayout();
-    compInfo.flags                       = VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
+    VkShaderModuleCreateInfo    shaderInfo{};
+    compInfo.stage       = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    compInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    compInfo.stage.pNext = &shaderInfo;
+    compInfo.stage.pName = "main";
+    compInfo.layout      = m_pipelineLayout;
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeClustersCull);
+    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeClustersCull);
     vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeClustersCull);
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeTriangleSplit);
+    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeTriangleSplit);
     vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeTriangleSplit);
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeClusterClassify);
+    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeClusterClassify);
     vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeClusterClassify);
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeBuildSetup);
+    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeBuildSetup);
     vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeBuildSetup);
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeInstancesClassify);
+    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeInstancesClassify);
     vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeInstancesClassify);
   }
 
@@ -284,151 +300,148 @@ bool RendererRasterClustersTess::init(Resources& res, Scene& scene, const Render
   return true;
 }
 
-void RendererRasterClustersTess::render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler)
+void RendererRasterClustersTess::render(VkCommandBuffer cmd, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler)
 {
   VkMemoryBarrier memBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
 
   m_sceneBuildShaderio.viewPos = frame.freezeCulling ? frame.frameConstantsLast.viewPos : frame.frameConstants.viewPos;
 
-  vkCmdUpdateBuffer(primary, res.m_common.view.buffer, 0, sizeof(shaderio::FrameConstants) * 2, (const uint32_t*)&frame.frameConstants);
-  vkCmdUpdateBuffer(primary, m_sceneBuildBuffer.buffer, 0, sizeof(shaderio::SceneBuilding), (const uint32_t*)&m_sceneBuildShaderio);
-  vkCmdFillBuffer(primary, res.m_common.readbackDevice.buffer, 0, sizeof(shaderio::Readback), 0);
-  vkCmdFillBuffer(primary, m_sceneSplitBuffer.buffer, 0, m_sceneSplitBuffer.info.range, ~0);
+  vkCmdUpdateBuffer(cmd, res.m_commonBuffers.frameConstants.buffer, 0, sizeof(shaderio::FrameConstants) * 2,
+                    (const uint32_t*)&frame.frameConstants);
+  vkCmdUpdateBuffer(cmd, m_sceneBuildBuffer.buffer, 0, sizeof(shaderio::SceneBuilding), (const uint32_t*)&m_sceneBuildShaderio);
+  vkCmdFillBuffer(cmd, res.m_commonBuffers.readBack.buffer, 0, sizeof(shaderio::Readback), 0);
+  vkCmdFillBuffer(cmd, m_sceneSplitBuffer.buffer, 0, m_sceneSplitBuffer.bufferSize, ~0);
 
   const bool useSky = true;  // When using Sky, the sky is rendered first and the rest of the scene is rendered on top of it.
 
   memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
   memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-  vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                        &memBarrier, 0, nullptr, 0, nullptr);
 
   {
-    if(useSky)
-    {
-      res.m_sky.skyParams() = frame.frameConstants.skyParams;
-      res.m_sky.updateParameterBuffer(primary);
-      res.cmdImageTransition(primary, res.m_framebuffer.imgColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
-      res.m_sky.draw(primary, frame.frameConstants.viewMatrix, frame.frameConstants.projMatrix,
-                     res.m_framebuffer.scissor.extent);
-    }
 
-    vkCmdBindDescriptorSets(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_dsetContainer.getPipeLayout(), 0, 1,
-                            m_dsetContainer.getSets(), 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, m_dsetPack.sets.data(), 0, nullptr);
 
     {
-      auto timerSection = profiler.timeRecurring("Instances Classify", primary);
+      auto timerSection = profiler.cmdFrameSection(cmd, "Instances Classify");
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeInstancesClassify);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeInstancesClassify);
 
-      vkCmdDispatch(primary, (m_sceneBuildShaderio.numRenderInstances + INSTANCES_CLASSIFY_WORKGROUP - 1) / INSTANCES_CLASSIFY_WORKGROUP,
+      vkCmdDispatch(cmd, (m_sceneBuildShaderio.numRenderInstances + INSTANCES_CLASSIFY_WORKGROUP - 1) / INSTANCES_CLASSIFY_WORKGROUP,
                     1, 1);
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                            &memBarrier, 0, nullptr, 0, nullptr);
     }
 
     {
-      auto timerSection = profiler.timeRecurring("Cull", primary);
+      auto timerSection = profiler.cmdFrameSection(cmd, "Cull");
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeClustersCull);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeClustersCull);
 
       for(size_t i = 0; i < m_renderInstances.size(); i++)
       {
         const shaderio::RenderInstance& renderInstance = m_renderInstances[i];
         uint32_t                        instanceId     = uint32_t(i);
-        vkCmdPushConstants(primary, m_dsetContainer.getPipeLayout(), m_stageFlags, 0, sizeof(uint32_t), &instanceId);
-        vkCmdDispatch(primary, (renderInstance.numClusters + CLUSTERS_CULL_WORKGROUP - 1) / CLUSTERS_CULL_WORKGROUP, 1, 1);
+        vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &instanceId);
+        vkCmdDispatch(cmd, (renderInstance.numClusters + CLUSTERS_CULL_WORKGROUP - 1) / CLUSTERS_CULL_WORKGROUP, 1, 1);
       }
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                            &memBarrier, 0, nullptr, 0, nullptr);
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
 
       uint32_t buildSetupID = BUILD_SETUP_CLASSIFY;
-      vkCmdPushConstants(primary, m_dsetContainer.getPipeLayout(), m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
-      vkCmdDispatch(primary, 1, 1, 1);
+      vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
+      vkCmdDispatch(cmd, 1, 1, 1);
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1,
                            &memBarrier, 0, nullptr, 0, nullptr);
     }
 
     {
-      auto timerSection = profiler.timeRecurring("Cluster Classify", primary);
+      auto timerSection = profiler.cmdFrameSection(cmd, "Cluster Classify");
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeClusterClassify);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeClusterClassify);
 
-      vkCmdDispatchIndirect(primary, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, dispatchClassify));
+      vkCmdDispatchIndirect(cmd, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, dispatchClassify));
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1,
                            &memBarrier, 0, nullptr, 0, nullptr);
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
 
       uint32_t buildSetupID = BUILD_SETUP_SPLIT;
-      vkCmdPushConstants(primary, m_dsetContainer.getPipeLayout(), m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
-      vkCmdDispatch(primary, 1, 1, 1);
+      vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
+      vkCmdDispatch(cmd, 1, 1, 1);
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                            &memBarrier, 0, nullptr, 0, nullptr);
     }
 
     {
-      auto timerSection = profiler.timeRecurring("Split", primary);
+      auto timerSection = profiler.cmdFrameSection(cmd, "Split");
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeTriangleSplit);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeTriangleSplit);
 
-      vkCmdDispatch(primary, (m_config.persistentThreads + TRIANGLE_SPLIT_WORKGROUP - 1) / TRIANGLE_SPLIT_WORKGROUP, 1, 1);
+      vkCmdDispatch(cmd, (m_config.persistentThreads + TRIANGLE_SPLIT_WORKGROUP - 1) / TRIANGLE_SPLIT_WORKGROUP, 1, 1);
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                            &memBarrier, 0, nullptr, 0, nullptr);
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
 
       uint32_t buildSetupID = BUILD_SETUP_DRAW_TESS;
-      vkCmdPushConstants(primary, m_dsetContainer.getPipeLayout(), m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
-      vkCmdDispatch(primary, 1, 1, 1);
+      vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
+      vkCmdDispatch(cmd, 1, 1, 1);
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            VK_PIPELINE_STAGE_MESH_SHADER_BIT_NV | VK_PIPELINE_STAGE_TASK_SHADER_BIT_NV
                                | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
                            0, 1, &memBarrier, 0, nullptr, 0, nullptr);
     }
 
     {
-      auto timerSection = profiler.timeRecurring("Draw", primary);
+      auto timerSection = profiler.cmdFrameSection(cmd, "Draw");
 
-      res.cmdBeginRendering(primary, false, useSky ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR);
+      VkAttachmentLoadOp op = useSky ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_CLEAR;
 
-      res.cmdDynamicState(primary);
-      vkCmdBindDescriptorSets(primary, VK_PIPELINE_BIND_POINT_GRAPHICS, m_dsetContainer.getPipeLayout(), 0, 1,
-                              m_dsetContainer.getSets(), 0, nullptr);
+      res.cmdBeginRendering(cmd, false, op, op);
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelines.graphicsMeshTess);
+      if(useSky)
+      {
+        writeBackgroundSky(cmd);
+      }
 
-      vkCmdDrawMeshTasksIndirectNV(primary, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, drawPartTriangles), 1, 0);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, m_dsetPack.sets.data(), 0, nullptr);
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelines.graphicsMeshFull);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelines.graphicsMeshTess);
 
-      vkCmdDrawMeshTasksIndirectNV(primary, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, drawFullClusters), 1, 0);
+      vkCmdDrawMeshTasksIndirectNV(cmd, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, drawPartTriangles), 1, 0);
 
-      vkCmdEndRendering(primary);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelines.graphicsMeshFull);
+
+      vkCmdDrawMeshTasksIndirectNV(cmd, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, drawFullClusters), 1, 0);
+
+      vkCmdEndRendering(cmd);
     }
   }
 
@@ -436,40 +449,32 @@ void RendererRasterClustersTess::render(VkCommandBuffer primary, Resources& res,
     // hiz
     if(!frame.freezeCulling)
     {
-      res.cmdBuildHiz(primary, frame, profiler);
+      res.cmdBuildHiz(cmd, frame, profiler);
     }
   }
 }
 
 void RendererRasterClustersTess::updatedFrameBuffer(Resources& res)
 {
-  vkDeviceWaitIdle(res.m_device);
-  std::array<VkWriteDescriptorSet, 1> writeSets;
-  writeSets[0] = m_dsetContainer.makeWrite(0, BINDINGS_HIZ_TEX, &res.m_hizUpdate.farImageInfo);
-  vkUpdateDescriptorSets(res.m_device, uint32_t(writeSets.size()), writeSets.data(), 0, nullptr);
+  nvvk::WriteSetContainer writeSets;
+  VkDescriptorSet         dset = m_dsetPack.sets[0];
+  writeSets.append(m_dsetPack.bindings.getWriteSet(BINDINGS_HIZ_TEX, dset), res.m_hizUpdate.farImageInfo);
+  vkUpdateDescriptorSets(res.m_device, writeSets.size(), writeSets.data(), 0, nullptr);
 
   Renderer::updatedFrameBuffer(res);
 }
 
 void RendererRasterClustersTess::deinit(Resources& res)
 {
-  vkDestroyPipeline(res.m_device, m_pipelines.graphicsMeshFull, nullptr);
-  vkDestroyPipeline(res.m_device, m_pipelines.graphicsMeshTess, nullptr);
-  vkDestroyPipeline(res.m_device, m_pipelines.computeClusterClassify, nullptr);
-  vkDestroyPipeline(res.m_device, m_pipelines.computeTriangleSplit, nullptr);
-  vkDestroyPipeline(res.m_device, m_pipelines.computeClustersCull, nullptr);
-  vkDestroyPipeline(res.m_device, m_pipelines.computeBuildSetup, nullptr);
-  vkDestroyPipeline(res.m_device, m_pipelines.computeInstancesClassify, nullptr);
-
-  res.destroy(m_sceneDataBuffer);
-  res.destroy(m_sceneBuildBuffer);
-  res.destroy(m_sceneSplitBuffer);
-
-  m_dsetContainer.deinit();
-
-  res.destroyShaders(m_shaders);
-
   m_tessTable.deinit(res);
+
+  res.m_allocator.destroyBuffer(m_sceneDataBuffer);
+  res.m_allocator.destroyBuffer(m_sceneBuildBuffer);
+  res.m_allocator.destroyBuffer(m_sceneSplitBuffer);
+
+  res.destroyPipelines(m_pipelines);
+  vkDestroyPipelineLayout(res.m_device, m_pipelineLayout, nullptr);
+  m_dsetPack.deinit();
 
   deinitBasics(res);
 }

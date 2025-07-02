@@ -21,8 +21,7 @@
 #include <glm/glm.hpp>
 
 #include "tessellation_table.hpp"
-#include "shaders/shaderio.h"
-#include "vk_nv_cluster_acc.h"
+#include "../shaders/shaderio.h"
 
 namespace tessellatedclusters {
 
@@ -32,10 +31,10 @@ void TessellationTable::init(Resources& res, bool withTemplates, uint32_t templa
   m_maxSizeConfigs = 1 << (glm::bitCount(m_maxSize) == 1 ? glm::findMSB(m_maxSize) : glm::findMSB(m_maxSize) + 1);
   m_numConfigs     = m_maxSizeConfigs * m_maxSizeConfigs * m_maxSizeConfigs;
 
-  m_vertices = res.createBuffer(sizeof(uint32_t) * tessellation_table::max_vertices, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  m_indices = res.createBuffer(sizeof(uint32_t) * tessellation_table::max_triangles, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  m_configs = res.createBuffer(sizeof(uint16_t) * 4 * m_numConfigs, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  m_ubo     = res.createBuffer(sizeof(shaderio::TessellationTable), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+  res.m_allocator.createBuffer(m_vertices, sizeof(uint32_t) * tessellation_table::max_vertices, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  res.m_allocator.createBuffer(m_indices, sizeof(uint32_t) * tessellation_table::max_triangles, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  res.m_allocator.createBuffer(m_configs, sizeof(uint16_t) * 4 * m_numConfigs, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  res.m_allocator.createBuffer(m_ubo, sizeof(shaderio::TessellationTable), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
   VkCommandBuffer cmd = res.createTempCmdBuffer();
 
@@ -96,13 +95,15 @@ void TessellationTable::initTemplates(Resources& res, uint32_t positionTruncateB
 {
   // * 2 for flipped version
 
-  RBuffer vertexBuffer = res.createBuffer(sizeof(glm::vec3) * tessellation_table::max_vertices * 2,
-                                          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  nvvk::Buffer vertexBuffer;
+  res.m_allocator.createBuffer(vertexBuffer, sizeof(glm::vec3) * tessellation_table::max_vertices * 2,
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, VMA_MEMORY_USAGE_CPU_ONLY,
+                               VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 
-  RBuffer indexBuffer = res.createBuffer(sizeof(uint8_t) * tessellation_table::max_triangles * 3 * 2,
-                                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  nvvk::Buffer indexBuffer;
+  res.m_allocator.createBuffer(indexBuffer, sizeof(uint8_t) * tessellation_table::max_triangles * 3 * 2,
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, VMA_MEMORY_USAGE_CPU_ONLY,
+                               VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 
   {
     glm::vec3* vertices = (glm::vec3*)vertexBuffer.mapping;
@@ -143,39 +144,47 @@ void TessellationTable::initTemplates(Resources& res, uint32_t positionTruncateB
     }
   }
 
-  m_templateInstantiationSizes =
-      res.createBuffer(sizeof(uint32_t) * m_numConfigs,
-                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
-  m_templateAddresses = res.createBuffer(sizeof(uint64_t) * m_numConfigs,
-                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                             | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  res.m_allocator.createBuffer(m_templateInstantiationSizes, sizeof(uint32_t) * m_numConfigs,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
-  RBuffer templateSizesStageBuffer =
-      res.createBuffer(sizeof(uint32_t) * m_numConfigs, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  res.m_allocator.createBuffer(m_templateAddresses, sizeof(uint64_t) * m_numConfigs,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
-  RBuffer templateAddressesStageBuffer =
-      res.createBuffer(sizeof(uint64_t) * m_numConfigs, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  nvvk::Buffer templateSizesStageBuffer;
+  res.m_allocator.createBuffer(templateSizesStageBuffer, sizeof(uint32_t) * m_numConfigs,
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VMA_MEMORY_USAGE_CPU_ONLY,
+                               VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+
+  nvvk::Buffer templateAddressesStageBuffer;
+  res.m_allocator.createBuffer(templateAddressesStageBuffer, sizeof(uint64_t) * m_numConfigs,
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VMA_MEMORY_USAGE_CPU_ONLY,
+                               VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 
   // * 2 because of flipped winding
 
-  RBuffer templateInstInfosBuffer =
-      res.createBuffer(sizeof(VkClusterAccelerationStructureInstantiateClusterInfoNV) * tessellation_table::max_configs * 2,
-                       VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  RBuffer templateInfosBuffer = res.createBuffer(sizeof(VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV)
-                                                     * tessellation_table::max_configs * 2,
-                                                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  RBuffer templateSizesBuffer = res.createBuffer(sizeof(uint32_t) * tessellation_table::max_configs * 2,
-                                                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  nvvk::Buffer templateInstInfosBuffer;
+  res.m_allocator.createBuffer(templateInstInfosBuffer,
+                               sizeof(VkClusterAccelerationStructureInstantiateClusterInfoNV) * tessellation_table::max_configs * 2,
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, VMA_MEMORY_USAGE_CPU_ONLY,
+                               VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  nvvk::Buffer templateInfosBuffer;
+  res.m_allocator.createBuffer(templateInfosBuffer,
+                               sizeof(VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV)
+                                   * tessellation_table::max_configs * 2,
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, VMA_MEMORY_USAGE_CPU_ONLY,
+                               VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
+  nvvk::Buffer templateSizesBuffer;
+  res.m_allocator.createBuffer(templateSizesBuffer, sizeof(uint32_t) * tessellation_table::max_configs * 2,
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, VMA_MEMORY_USAGE_CPU_ONLY,
+                               VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 
-  RBuffer templateAddressesBuffer = res.createBuffer(sizeof(uint32_t) * tessellation_table::max_configs * 2,
-                                                     VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  nvvk::Buffer templateAddressesBuffer;
+  res.m_allocator.createBuffer(templateAddressesBuffer, sizeof(uint32_t) * tessellation_table::max_configs * 2,
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, VMA_MEMORY_USAGE_CPU_ONLY,
+                               VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 
   {
     auto* templateInfos = (VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV*)templateInfosBuffer.mapping;
@@ -213,7 +222,7 @@ void TessellationTable::initTemplates(Resources& res, uint32_t positionTruncateB
     }
   }
 
-  RBuffer scratchBuffer;
+  nvvk::Buffer scratchBuffer;
 
   {
     // slightly lower totals because we do one geometry at a time for template builds.
@@ -237,17 +246,18 @@ void TessellationTable::initTemplates(Resources& res, uint32_t positionTruncateB
     VkAccelerationStructureBuildSizesInfoKHR sizesInfo = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     vkGetClusterAccelerationStructureBuildSizesNV(res.m_device, &inputs, &sizesInfo);
 
-    scratchBuffer = res.createBuffer(sizesInfo.buildScratchSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
+    res.m_allocator.createBuffer(scratchBuffer, sizesInfo.buildScratchSize,
+                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
 
     // first pass query sizes
 
     VkCommandBuffer cmd;
     VkClusterAccelerationStructureCommandsInfoNV cmdInfo = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_COMMANDS_INFO_NV};
     cmdInfo.srcInfosArray.deviceAddress = templateInfosBuffer.address;
-    cmdInfo.srcInfosArray.size          = templateInfosBuffer.info.range;
+    cmdInfo.srcInfosArray.size          = templateInfosBuffer.bufferSize;
     cmdInfo.srcInfosArray.stride        = sizeof(VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV);
     cmdInfo.dstSizesArray.deviceAddress = templateSizesBuffer.address;
-    cmdInfo.dstSizesArray.size          = templateSizesBuffer.info.range;
+    cmdInfo.dstSizesArray.size          = templateSizesBuffer.bufferSize;
     cmdInfo.dstSizesArray.stride        = sizeof(uint32_t);
     cmdInfo.scratchData                 = scratchBuffer.address;
 
@@ -269,7 +279,7 @@ void TessellationTable::initTemplates(Resources& res, uint32_t positionTruncateB
       templateDataSize += ((uint32_t*)templateSizesBuffer.mapping)[t];
     }
 
-    m_templateData = res.createBuffer(templateDataSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
+    res.m_allocator.createBuffer(m_templateData, templateDataSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
 
     templateDataSize = 0;
     // prepare explicit address
@@ -285,7 +295,7 @@ void TessellationTable::initTemplates(Resources& res, uint32_t positionTruncateB
     inputs.opType = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_BUILD_TRIANGLE_CLUSTER_TEMPLATE_NV;
 
     cmdInfo.dstAddressesArray.deviceAddress = templateAddressesBuffer.address;
-    cmdInfo.dstAddressesArray.size          = templateAddressesBuffer.info.range;
+    cmdInfo.dstAddressesArray.size          = templateAddressesBuffer.bufferSize;
     cmdInfo.dstAddressesArray.stride        = sizeof(uint64_t);
 
     cmd = res.createTempCmdBuffer();
@@ -300,7 +310,7 @@ void TessellationTable::initTemplates(Resources& res, uint32_t positionTruncateB
     inputs.opType = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_INSTANTIATE_TRIANGLE_CLUSTER_NV;
 
     cmdInfo.srcInfosArray.deviceAddress     = templateInstInfosBuffer.address;
-    cmdInfo.srcInfosArray.size              = templateInstInfosBuffer.info.range;
+    cmdInfo.srcInfosArray.size              = templateInstInfosBuffer.bufferSize;
     cmdInfo.srcInfosArray.stride            = sizeof(VkClusterAccelerationStructureInstantiateClusterInfoNV);
     cmdInfo.dstAddressesArray.deviceAddress = 0;
     cmdInfo.dstAddressesArray.size          = 0;
@@ -374,26 +384,26 @@ void TessellationTable::initTemplates(Resources& res, uint32_t positionTruncateB
     res.tempSyncSubmit(cmd);
   }
 
-  res.destroy(vertexBuffer);
-  res.destroy(indexBuffer);
-  res.destroy(templateInstInfosBuffer);
-  res.destroy(templateInfosBuffer);
-  res.destroy(templateAddressesBuffer);
-  res.destroy(templateSizesBuffer);
-  res.destroy(templateAddressesStageBuffer);
-  res.destroy(templateSizesStageBuffer);
-  res.destroy(scratchBuffer);
+  res.m_allocator.destroyBuffer(vertexBuffer);
+  res.m_allocator.destroyBuffer(indexBuffer);
+  res.m_allocator.destroyBuffer(templateInstInfosBuffer);
+  res.m_allocator.destroyBuffer(templateInfosBuffer);
+  res.m_allocator.destroyBuffer(templateAddressesBuffer);
+  res.m_allocator.destroyBuffer(templateSizesBuffer);
+  res.m_allocator.destroyBuffer(templateAddressesStageBuffer);
+  res.m_allocator.destroyBuffer(templateSizesStageBuffer);
+  res.m_allocator.destroyBuffer(scratchBuffer);
 }
 
 void TessellationTable::deinit(Resources& res)
 {
-  res.destroy(m_ubo);
-  res.destroy(m_configs);
-  res.destroy(m_vertices);
-  res.destroy(m_indices);
-  res.destroy(m_templateData);
-  res.destroy(m_templateAddresses);
-  res.destroy(m_templateInstantiationSizes);
+  res.m_allocator.destroyBuffer(m_ubo);
+  res.m_allocator.destroyBuffer(m_configs);
+  res.m_allocator.destroyBuffer(m_vertices);
+  res.m_allocator.destroyBuffer(m_indices);
+  res.m_allocator.destroyBuffer(m_templateData);
+  res.m_allocator.destroyBuffer(m_templateAddresses);
+  res.m_allocator.destroyBuffer(m_templateInstantiationSizes);
 }
 
 }  // namespace tessellatedclusters

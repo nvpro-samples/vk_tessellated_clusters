@@ -20,32 +20,37 @@
 #include <random>
 #include <vector>
 
-#include <nvvk/raytraceKHR_vk.hpp>
+#include <glm/gtc/constants.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/scalar_constants.hpp>
-#include "glm/gtc/constants.hpp"
 #include "glm/gtc/matrix_transform.hpp"
 
 #include "renderer.hpp"
-#include "vk_nv_cluster_acc.h"
-#include "shaders/shaderio.h"
+#include "../shaders/shaderio.h"
 
 namespace tessellatedclusters {
 
 bool Renderer::initBasicShaders(Resources& res, Scene& scene, const RendererConfig& config)
 {
-  m_basicShaders.fullScreenVertexShader = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_VERTEX_BIT, "fullscreen.vert.glsl");
-  m_basicShaders.fullscreenWriteDepthFragShader =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_FRAGMENT_BIT, "fullscreen_write_depth.frag.glsl");
+  res.compileShader(m_basicShaders.fullScreenVertexShader, VK_SHADER_STAGE_VERTEX_BIT, "fullscreen.vert.glsl");
+  res.compileShader(m_basicShaders.fullscreenWriteDepthFragShader, VK_SHADER_STAGE_FRAGMENT_BIT, "fullscreen_write_depth.frag.glsl");
+  res.compileShader(m_basicShaders.fullscreenBackgroundFragShader, VK_SHADER_STAGE_FRAGMENT_BIT, "fullscreen_background.frag.glsl");
 
-  return res.verifyShaders(m_basicShaders);
+  if(!res.verifyShaders(m_basicShaders))
+  {
+    return false;
+  }
+
+  return true;
 }
 
 void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& config)
 {
+  initBasicPipelines(res, scene, config);
   m_renderInstances.resize(scene.m_instances.size() * config.numSceneCopies);
 
-
-  initWriteRayTracingDepthBuffer(res, scene, config);
+  std::default_random_engine            rng(2342);
+  std::uniform_real_distribution<float> randomUnorm(0.0f, 1.0f);
 
   uint32_t axis    = config.gridConfig;
   size_t   sq      = 1;
@@ -82,8 +87,6 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
   glm::vec3 gridShift;
   glm::mat4 gridRotMatrix;
 
-  std::default_random_engine            rng(2342);
-  std::uniform_real_distribution<float> randomUnorm(0.0f, 1.0f);
 
   for(size_t i = 0; i < m_renderInstances.size(); i++)
   {
@@ -93,8 +96,10 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
     // todo modify matrix etc. for grid layout
 
     shaderio::RenderInstance& renderInstance = m_renderInstances[i];
-    const uint32_t            geometryID     = scene.m_instances[originalIndex].geometryID;
-    const Scene::Geometry&    geometry       = scene.m_geometries[geometryID];
+    renderInstance                           = {};
+
+    const uint32_t         geometryID = scene.m_instances[originalIndex].geometryID;
+    const Scene::Geometry& geometry   = scene.m_geometries[geometryID];
 
     glm::mat4 worldMatrix = scene.m_instances[originalIndex].matrix;
 
@@ -205,39 +210,31 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
     renderInstance.geoHi = glm::vec4(geometry.bbox.hi, glm::length(geometry.bbox.hi - geometry.bbox.lo));
   }
 
-  m_renderInstanceBuffer =
-      res.createBuffer(sizeof(shaderio::RenderInstance) * m_renderInstances.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
+  res.m_allocator.createBuffer(m_renderInstanceBuffer, sizeof(shaderio::RenderInstance) * m_renderInstances.size(),
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   res.simpleUploadBuffer(m_renderInstanceBuffer, m_renderInstances.data());
 
-  m_resourceReservedUsage.operationsMemBytes += m_renderInstanceBuffer.info.range;
+  m_resourceReservedUsage.operationsMemBytes += m_renderInstanceBuffer.bufferSize;
   m_resourceReservedUsage.geometryMemBytes = scene.m_sceneMemBytes;
 }
 
-
 void Renderer::deinitBasics(Resources& res)
 {
-  res.destroyShaders(m_basicShaders);
+  res.destroyPipelines(m_basicPipelines);
 
-  vkDestroyPipeline(res.m_device, m_writeDepthBufferPipeline, nullptr);
-  m_writeDepthBufferPipeline = VK_NULL_HANDLE;
+  m_basicDset.deinit();
+  vkDestroyPipelineLayout(res.m_device, m_basicPipelineLayout, nullptr);
 
-  m_writeDepthBufferDsetContainer.deinit();
-
-  res.destroy(m_renderInstanceBuffer);
+  res.m_allocator.destroyBuffer(m_renderInstanceBuffer);
 }
 
-void Renderer::updatedFrameBufferBasics(Resources& res)
+void Renderer::updateBasicDescriptors(Resources& res)
 {
-  {
-    std::array<VkWriteDescriptorSet, 1> writeSets;
-
-    VkDescriptorImageInfo imgInfo{};
-    imgInfo.imageView   = res.m_framebuffer.viewRaytracingDepth;
-    imgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-    writeSets[0] = m_writeDepthBufferDsetContainer.makeWrite(0, BINDINGS_RAYTRACING_DEPTH, &imgInfo);
-    vkUpdateDescriptorSets(res.m_device, uint32_t(writeSets.size()), writeSets.data(), 0, nullptr);
-  }
+  nvvk::WriteSetContainer writeSets;
+  writeSets.append(m_basicDset.getWriteSet(BINDINGS_FRAME_UBO), res.m_commonBuffers.frameConstants);
+  writeSets.append(m_basicDset.getWriteSet(BINDINGS_RAYTRACING_DEPTH), res.m_frameBuffer.imgRaytracingDepth.descriptor);
+  vkUpdateDescriptorSets(res.m_device, writeSets.size(), writeSets.data(), 0, nullptr);
 }
 
 void Renderer::initRayTracingTlas(Resources& res, Scene& scene, const RendererConfig& config, const VkAccelerationStructureKHR* blas)
@@ -270,11 +267,10 @@ void Renderer::initRayTracingTlas(Resources& res, Scene& scene, const RendererCo
 
 
   // Create a buffer holding the actual instance data (matrices++) for use by the AS builder
-  m_tlasInstancesBuffer = res.createBuffer(tlasInstances.size() * sizeof(VkAccelerationStructureInstanceKHR),
-                                           VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  res.m_allocator.createBuffer(m_tlasInstancesBuffer, tlasInstances.size() * sizeof(VkAccelerationStructureInstanceKHR),
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   m_resourceReservedUsage.operationsMemBytes += tlasInstances.size() * sizeof(VkAccelerationStructureInstanceKHR);
   res.simpleUploadBuffer(m_tlasInstancesBuffer, tlasInstances.data());
-  res.tempResetResources();
 
   // Wraps a device pointer to the above uploaded instances.
   VkAccelerationStructureGeometryInstancesDataKHR instancesVk{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
@@ -306,10 +302,11 @@ void Renderer::initRayTracingTlas(Resources& res, Scene& scene, const RendererCo
   createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
   createInfo.size = sizeInfo.accelerationStructureSize;
 
-  m_tlas = res.createAccelKHR(createInfo);
+  res.m_allocator.createAcceleration(m_tlas, createInfo);
   m_resourceReservedUsage.rtTlasMemBytes += createInfo.size;
   // Allocate the scratch memory
-  m_tlasScratchBuffer = res.createBuffer(sizeInfo.buildScratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  res.m_allocator.createBuffer(m_tlasScratchBuffer, sizeInfo.buildScratchSize,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
   m_resourceReservedUsage.operationsMemBytes += sizeInfo.buildScratchSize;
 
   // Update build information
@@ -320,7 +317,6 @@ void Renderer::initRayTracingTlas(Resources& res, Scene& scene, const RendererCo
 
 void Renderer::updateRayTracingTlas(VkCommandBuffer cmd, Resources& res, Scene& scene, bool update)
 {
-
   if(update)
   {
     m_tlasBuildInfo.mode                     = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
@@ -343,50 +339,64 @@ void Renderer::updateRayTracingTlas(VkCommandBuffer cmd, Resources& res, Scene& 
 
 void Renderer::deinitRayTracingTlas(Resources& res)
 {
-  res.destroy(m_tlasInstancesBuffer);
-  res.destroy(m_tlasScratchBuffer);
-  res.destroy(m_tlas);
+  res.m_allocator.destroyBuffer(m_tlasInstancesBuffer);
+  res.m_allocator.destroyBuffer(m_tlasScratchBuffer);
+  res.m_allocator.destroyAcceleration(m_tlas);
 }
 
-void Renderer::initWriteRayTracingDepthBuffer(Resources& res, Scene& scene, const RendererConfig& config)
+void Renderer::initBasicPipelines(Resources& res, Scene& scene, const RendererConfig& config)
 {
   VkShaderStageFlags stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
-  m_writeDepthBufferDsetContainer.init(res.m_device);
+  m_basicDset.bindings.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, stageFlags);
+  m_basicDset.bindings.addBinding(BINDINGS_RAYTRACING_DEPTH, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, stageFlags);
+  m_basicDset.initFromBindings(res.m_device);
+  nvvk::createPipelineLayout(res.m_device, &m_basicPipelineLayout, {m_basicDset.layout});
 
-  m_writeDepthBufferDsetContainer.addBinding(BINDINGS_RAYTRACING_DEPTH, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, stageFlags);
-  m_writeDepthBufferDsetContainer.initLayout();
-  m_writeDepthBufferDsetContainer.initPipeLayout();
-
-  m_writeDepthBufferDsetContainer.initPool(1);
-  std::array<VkWriteDescriptorSet, 1> writeSets;
-
-  VkDescriptorImageInfo imgInfo{};
-  imgInfo.imageView   = res.m_framebuffer.viewRaytracingDepth;
-  imgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-  writeSets[0] = m_writeDepthBufferDsetContainer.makeWrite(0, BINDINGS_RAYTRACING_DEPTH, &imgInfo);
-  vkUpdateDescriptorSets(res.m_device, uint32_t(writeSets.size()), writeSets.data(), 0, nullptr);
+  updateBasicDescriptors(res);
 
   nvvk::GraphicsPipelineState state = res.m_basicGraphicsState;
 
-  nvvk::GraphicsPipelineGenerator gfxGen(res.m_device, m_writeDepthBufferDsetContainer.getPipeLayout(),
-                                         res.m_framebuffer.pipelineRenderingInfo, state);
+  nvvk::GraphicsPipelineCreator graphicsGen;
+  graphicsGen.pipelineInfo.layout                    = m_basicPipelineLayout;
+  graphicsGen.renderingState.depthAttachmentFormat   = res.m_frameBuffer.pipelineRenderingInfo.depthAttachmentFormat;
+  graphicsGen.renderingState.stencilAttachmentFormat = res.m_frameBuffer.pipelineRenderingInfo.stencilAttachmentFormat;
+  graphicsGen.colorFormats                           = {res.m_frameBuffer.colorFormat};
 
-  state.setBlendAttachmentColorMask(0, 0);
   state.depthStencilState.depthWriteEnable = VK_TRUE;
   state.depthStencilState.depthCompareOp   = VK_COMPARE_OP_ALWAYS;
   state.rasterizationState.cullMode        = VK_CULL_MODE_NONE;
-  gfxGen.addShader(res.m_shaderManager.get(m_basicShaders.fullScreenVertexShader), VK_SHADER_STAGE_VERTEX_BIT);
-  gfxGen.addShader(res.m_shaderManager.get(m_basicShaders.fullscreenWriteDepthFragShader), VK_SHADER_STAGE_FRAGMENT_BIT);
-  m_writeDepthBufferPipeline = gfxGen.createPipeline();
+
+  graphicsGen.addShader(VK_SHADER_STAGE_VERTEX_BIT, "main",
+                        nvvkglsl::GlslCompiler::getSpirvData(m_basicShaders.fullScreenVertexShader));
+  graphicsGen.addShader(VK_SHADER_STAGE_FRAGMENT_BIT, "main",
+                        nvvkglsl::GlslCompiler::getSpirvData(m_basicShaders.fullscreenBackgroundFragShader));
+
+  graphicsGen.createGraphicsPipeline(res.m_device, nullptr, state, &m_basicPipelines.background);
+
+  graphicsGen.clearShaders();
+  state.colorWriteMasks = {0};
+
+  graphicsGen.addShader(VK_SHADER_STAGE_VERTEX_BIT, "main",
+                        nvvkglsl::GlslCompiler::getSpirvData(m_basicShaders.fullScreenVertexShader));
+  graphicsGen.addShader(VK_SHADER_STAGE_FRAGMENT_BIT, "main",
+                        nvvkglsl::GlslCompiler::getSpirvData(m_basicShaders.fullscreenWriteDepthFragShader));
+
+  graphicsGen.createGraphicsPipeline(res.m_device, nullptr, state, &m_basicPipelines.writeDepth);
 }
 
 void Renderer::writeRayTracingDepthBuffer(VkCommandBuffer cmd)
 {
-  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_writeDepthBufferDsetContainer.getPipeLayout(), 0, 1,
-                          m_writeDepthBufferDsetContainer.getSets(), 0, nullptr);
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_writeDepthBufferPipeline);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_basicPipelineLayout, 0, 1, m_basicDset.sets.data(), 0, nullptr);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_basicPipelines.writeDepth);
+
+  vkCmdDraw(cmd, 3, 1, 0, 0);
+}
+
+void Renderer::writeBackgroundSky(VkCommandBuffer cmd)
+{
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_basicPipelineLayout, 0, 1, m_basicDset.sets.data(), 0, nullptr);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_basicPipelines.background);
 
   vkCmdDraw(cmd, 3, 1, 0, 0);
 }

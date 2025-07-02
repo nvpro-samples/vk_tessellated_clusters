@@ -21,7 +21,6 @@
 
 #include "renderer.hpp"
 #include "tessellation_table.hpp"
-#include "vk_nv_cluster_acc.h"
 
 namespace tessellatedclusters {
 
@@ -42,9 +41,9 @@ public:
   struct GeometryTemplate
   {
     // persistent data
-    RBuffer templateData;
-    RBuffer templateAddresses;
-    RBuffer templateInstantiationSizes;
+    nvvk::Buffer templateData;
+    nvvk::Buffer templateAddresses;
+    nvvk::Buffer templateInstantiationSizes;
   };
 
   RendererConfig m_config;
@@ -59,7 +58,7 @@ public:
   VkDeviceSize m_clusterDataSize = 0;
 
   VkDeviceSize m_scratchSize = 0;
-  RBuffer      m_scratchBuffer;
+  nvvk::Buffer m_scratchBuffer;
 
   std::vector<uint32_t> m_maxClusterSizes;
 

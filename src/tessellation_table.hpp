@@ -40,14 +40,14 @@ public:
   uint32_t m_maxVertices  = 0;
   uint32_t m_maxTriangles = 0;
 
-  RBuffer m_vertices;
-  RBuffer m_indices;
-  RBuffer m_configs;
-  RBuffer m_ubo;
+  nvvk::Buffer m_vertices;
+  nvvk::Buffer m_indices;
+  nvvk::Buffer m_configs;
+  nvvk::Buffer m_ubo;
 
-  RBuffer m_templateAddresses;
-  RBuffer m_templateInstantiationSizes;
-  RBuffer m_templateData;
+  nvvk::Buffer m_templateAddresses;
+  nvvk::Buffer m_templateInstantiationSizes;
+  nvvk::Buffer m_templateData;
 
   uint32_t m_maxClusterSize = 0;
 

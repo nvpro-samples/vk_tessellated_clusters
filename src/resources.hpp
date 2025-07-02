@@ -18,34 +18,36 @@
 */
 
 #pragma once
-#include <cassert>
-#include <algorithm>
 
-#include <platform.h>
-#include <nvh/nvprint.hpp>
-#include <nvh/alignment.hpp>
-#include <nvvk/context_vk.hpp>
+#include <span>
+
+#if __INTELLISENSE__
+#undef VK_NO_PROTOTYPES
+#endif
+
+#include <glm/glm.hpp>
+#include <nvutils/logger.hpp>
+#include <nvutils/alignment.hpp>
+#include <nvvk/check_error.hpp>
+#include <nvvk/debug_util.hpp>
+#include <nvvk/default_structs.hpp>
+#include <nvvk/resource_allocator.hpp>
+#include <nvvk/sampler_pool.hpp>
+#include <nvvk/staging.hpp>
+#include <nvvk/descriptors.hpp>
+#include <nvvk/graphics_pipeline.hpp>
 #include <nvvk/profiler_vk.hpp>
-#include <nvvk/buffers_vk.hpp>
-#include <nvvk/commands_vk.hpp>
-#include <nvvk/debug_util_vk.hpp>
-#include <nvvk/descriptorsets_vk.hpp>
-#include <nvvk/memorymanagement_vk.hpp>
-#include <nvvk/pipeline_vk.hpp>
-#include <nvvk/shadermodulemanager_vk.hpp>
-#include <nvvk/resourceallocator_vk.hpp>
-#include <nvvkhl/sky.hpp>
+#include <nvvkglsl/glsl.hpp>
 
 #include "hbao_pass.hpp"
 #include "nvhiz_vk.hpp"
-#include "shaders/shaderio.h"
+#include "../shaders/shaderio.h"
 
 namespace tessellatedclusters {
 
 struct FrameConfig
 {
-  uint32_t winWidth;
-  uint32_t winHeight;
+  VkExtent2D windowSize;
 
   bool freezeCulling = false;
   bool hbaoActive    = true;
@@ -59,68 +61,61 @@ struct FrameConfig
 
 //////////////////////////////////////////////////////////////////////////
 
-struct RBuffer : nvvk::Buffer
+struct PhysicalDeviceInfo
 {
-  VkDescriptorBufferInfo info    = {VK_NULL_HANDLE};
-  void*                  mapping = nullptr;
+  VkPhysicalDeviceProperties         properties10;
+  VkPhysicalDeviceVulkan11Properties properties11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES};
+  VkPhysicalDeviceVulkan12Properties properties12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
+  VkPhysicalDeviceVulkan13Properties properties13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES};
+  VkPhysicalDeviceVulkan14Properties properties14 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES};
+
+  VkPhysicalDeviceFeatures         features10;
+  VkPhysicalDeviceVulkan11Features features11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+  VkPhysicalDeviceVulkan12Features features12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+  VkPhysicalDeviceVulkan13Features features13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+  VkPhysicalDeviceVulkan14Features features14 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES};
+
+  void init(VkPhysicalDevice physicalDevice, uint32_t apiVersion = VK_API_VERSION_1_4)
+  {
+    assert(apiVersion >= VK_API_VERSION_1_2);
+
+    VkPhysicalDeviceProperties2 props = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    props.pNext                       = &properties11;
+    properties11.pNext                = &properties12;
+    if(apiVersion >= VK_API_VERSION_1_3)
+    {
+      properties12.pNext = &properties13;
+    }
+    if(apiVersion >= VK_API_VERSION_1_4)
+    {
+      properties13.pNext = &properties14;
+    }
+    vkGetPhysicalDeviceProperties2(physicalDevice, &props);
+    properties10 = props.properties;
+
+    VkPhysicalDeviceFeatures2 features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    features.pNext                     = &features11;
+    features11.pNext                   = &features12;
+    if(apiVersion >= VK_API_VERSION_1_3)
+    {
+      features12.pNext = &features13;
+    }
+    if(apiVersion >= VK_API_VERSION_1_4)
+    {
+      features13.pNext = &features14;
+    }
+    vkGetPhysicalDeviceFeatures2(physicalDevice, &features);
+    features10 = features.features;
+  }
 };
 
-// allows > 4 GB allocations using sparse memory
-struct RLargeBuffer : nvvk::LargeBuffer
+inline void cmdCopyBuffer(VkCommandBuffer cmd, const nvvk::Buffer& src, const nvvk::Buffer& dst)
 {
-  VkDescriptorBufferInfo info = {VK_NULL_HANDLE};
-};
-
-template <class T>
-struct RBufferTyped : RBuffer
-{
-  typedef T value_type;
-
-  RBufferTyped& operator=(RBuffer other)
-  {
-    *(RBuffer*)this = other;
-    return *this;
-  }
-
-  size_t   size() const { return info.range / sizeof(T); }
-  const T* data() const { return static_cast<const T*>(mapping); }
-  T*       data() { return static_cast<T*>(mapping); }
-
-  VkDeviceAddress addressAt(size_t idx) const
-  {
-    assert(idx < size());
-    return address + sizeof(T) * idx;
-  }
-
-  VkDeviceAddress addressRange(size_t start, size_t num) const
-  {
-    assert(start + num <= size());
-    return address + sizeof(T) * start;
-  }
-};
-
-struct RImage : nvvk::Image
-{
-  RImage() {}
-  RImage& operator=(nvvk::Image other)
-  {
-    *(nvvk::Image*)this = other;
-    layout              = VK_IMAGE_LAYOUT_UNDEFINED;
-    return *this;
-  }
-
-  VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
-};
-
-inline void cmdCopyBuffer(VkCommandBuffer cmd, const RBuffer& src, const RBuffer& dst)
-{
-  VkBufferCopy cpy = {src.info.offset, dst.info.offset, src.info.range};
+  VkBufferCopy cpy = {0, 0, src.bufferSize};
   vkCmdCopyBuffer(cmd, src.buffer, dst.buffer, 1, &cpy);
 }
 
 //////////////////////////////////////////////////////////////////////////
-
-#define DEBUGUTIL_SET_NAME(var) debugUtil.setObjectName(var, #var)
 
 enum VisRtCompletMode
 {
@@ -139,7 +134,7 @@ struct BufferRanges
 
   VkDeviceSize append(VkDeviceSize size, VkDeviceSize alignment)
   {
-    tempOffset = nvh::align_up(tempOffset, alignment);
+    tempOffset = nvutils::align_up(tempOffset, alignment);
 
     VkDeviceSize offset = tempOffset;
     tempOffset += size;
@@ -159,19 +154,24 @@ struct BufferRanges
   }
   void endOverlap() { tempOffset = std::max(splitOffset, tempOffset); }
 
-  VkDeviceSize getSize(VkDeviceSize alignment = 4) { return nvh::align_up(tempOffset, alignment); }
+  VkDeviceSize getSize(VkDeviceSize alignment = 4) { return nvutils::align_up(tempOffset, alignment); }
 };
 
 
 class Resources
 {
 public:
+  static constexpr VkPipelineStageFlags2 ALL_SHADER_STAGES =
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT
+      | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+
+
   struct FrameBuffer
   {
-    int  renderWidth  = 0;
-    int  renderHeight = 0;
-    int  supersample  = 0;
-    bool useResolved  = false;
+    VkExtent2D renderSize{};
+
+    int  supersample = 0;
+    bool useResolved = false;
 
     VkFormat colorFormat = VK_FORMAT_R8G8B8A8_UNORM;
     VkFormat depthStencilFormat;
@@ -179,139 +179,83 @@ public:
     VkViewport viewport;
     VkRect2D   scissor;
 
-    RImage imgColor         = {};
-    RImage imgColorResolved = {};
-    RImage imgDepthStencil  = {};
+    nvvk::Image imgColor         = {};
+    nvvk::Image imgColorResolved = {};
+    nvvk::Image imgDepthStencil  = {};
 
-    VkImageView viewColor         = VK_NULL_HANDLE;
-    VkImageView viewColorResolved = VK_NULL_HANDLE;
-    VkImageView viewDepthStencil  = VK_NULL_HANDLE;
-    VkImageView viewDepth         = VK_NULL_HANDLE;
+    VkImageView viewDepth = VK_NULL_HANDLE;
 
     VkFormat    raytracingDepthFormat = VK_FORMAT_R32_SFLOAT;
-    RImage      imgRaytracingDepth    = {};
-    VkImageView viewRaytracingDepth   = VK_NULL_HANDLE;
+    nvvk::Image imgRaytracingDepth    = {};
 
-    RImage imgHizFar = {};
+    nvvk::Image imgHizFar = {};
 
     VkPipelineRenderingCreateInfo pipelineRenderingInfo = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
   };
 
-  struct CommonResources
-  {
-    RBuffer view;
-    RBuffer readbackDevice;
-    RBuffer readbackHost;
-  };
 
-  const nvvk::Context* m_context;
-  VkDevice             m_device = VK_NULL_HANDLE;
-  VkPhysicalDevice     m_physical;
-  VkQueue              m_queue;
-  uint32_t             m_queueFamily;
-
-  VkPipelineStageFlags m_supportedSaderStageFlags;
-
-  nvvk::DeviceMemoryAllocator m_memAllocator;
-  nvvk::ResourceAllocator     m_allocator;
-
-  NVHizVK              m_hiz;
-  NVHizVK::Update      m_hizUpdate;
-  nvvk::ShaderModuleID m_hizShaders[NVHizVK::SHADER_COUNT];
-
-  bool            m_hbaoFullRes = false;
-  HbaoPass        m_hbaoPass;
-  HbaoPass::Frame m_hbaoFrame;
-
-  nvvk::CommandPool           m_tempCommandPool;
-  nvvk::ShaderModuleManager   m_shaderManager;
-  nvvk::GraphicsPipelineState m_basicGraphicsState;
-
-  nvvkhl::SimpleSkyDome m_sky;
-
-  CommonResources m_common;
-  FrameBuffer     m_framebuffer;
-
-  uint32_t m_cycleIndex  = 0;
-  size_t   m_fboChangeID = ~0;
-
-  glm::vec4 m_bgColor = {0.1, 0.13, 0.15, 1.0};
-
-  bool init(nvvk::Context* context, const std::vector<std::string>& shaderSearchPaths);
+  void init(VkDevice device, VkPhysicalDevice physicalDevice, VkInstance instance, nvvk::QueueInfo queue);
   void deinit();
 
-  bool initFramebuffer(int width, int height, int supersample, bool hbaoFullRes);
+  bool initFramebuffer(const VkExtent2D& windowSize, int supersample, bool hbaoFullRes);
   void deinitFramebuffer();
 
-  void synchronize(const char* debugMsg = nullptr);
-
   void beginFrame(uint32_t cycleIndex);
-  void postProcessFrame(VkCommandBuffer cmd, const FrameConfig& frame, nvvk::ProfilerVK& profiler);
-  void emptyFrame(VkCommandBuffer cmd, const FrameConfig& frame, nvvk::ProfilerVK& profiler);
+  void postProcessFrame(VkCommandBuffer cmd, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler);
+  void emptyFrame(VkCommandBuffer cmd, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler);
   void endFrame();
 
-  void cmdBuildHiz(VkCommandBuffer cmd, const FrameConfig& frame, nvvk::ProfilerVK& profiler);
-  void cmdHBAO(VkCommandBuffer cmd, const FrameConfig& frame, nvvk::ProfilerVK& profiler);
+  void cmdBuildHiz(VkCommandBuffer cmd, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler);
+  void cmdHBAO(VkCommandBuffer cmd, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler);
 
   void getReadbackData(shaderio::Readback& readback);
 
   //////////////////////////////////////////////////////////////////////////
 
+  shaderc::CompileOptions makeCompilerOptions() { return shaderc::CompileOptions(m_glslCompiler.options()); }
+
+  bool compileShader(shaderc::SpvCompilationResult& compiled,
+                     VkShaderStageFlagBits          shader,
+                     const std::filesystem::path&   filePath,
+                     shaderc::CompileOptions*       options = nullptr);
+
   // tests if all shaders compiled well, returns false if not
   // also destroys all shaders if not all were successful.
-  bool verifyShaders(size_t numShaders, nvvk::ShaderModuleID* shaders);
+  bool verifyShaders(size_t numShaders, shaderc::SpvCompilationResult* shaders)
+  {
+    for(size_t i = 0; i < numShaders; i++)
+    {
+      if(shaders[i].GetCompilationStatus() != shaderc_compilation_status_null_result_object
+         && shaders[i].GetCompilationStatus() != shaderc_compilation_status_success)
+        return false;
+    }
+
+    return true;
+  }
   template <typename T>
   bool verifyShaders(T& container)
   {
-    return verifyShaders(sizeof(T) / sizeof(nvvk::ShaderModuleID), (nvvk::ShaderModuleID*)&container);
+    return verifyShaders(sizeof(T) / sizeof(shaderc::SpvCompilationResult), (shaderc::SpvCompilationResult*)&container);
   }
 
-  void destroyShaders(size_t numShaders, nvvk::ShaderModuleID* shaders);
+  void destroyPipelines(size_t numPipelines, VkPipeline* pipelines)
+  {
+    for(size_t i = 0; i < numPipelines; i++)
+    {
+      vkDestroyPipeline(m_device, pipelines[i], nullptr);
+      pipelines[i] = nullptr;
+    }
+  }
   template <typename T>
-  void destroyShaders(T& container)
+  void destroyPipelines(T& container)
   {
-    destroyShaders(sizeof(T) / sizeof(nvvk::ShaderModuleID), (nvvk::ShaderModuleID*)&container);
+    destroyPipelines(sizeof(T) / sizeof(VkPipeline), (VkPipeline*)&container);
   }
-
-  //////////////////////////////////////////////////////////////////////////
-
-  bool isBufferSizeValid(VkDeviceSize size) const;
-
-  RBuffer createBuffer(VkDeviceSize size, VkBufferUsageFlags flags, VkMemoryPropertyFlags memFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-
-  template <class T>
-  void createBufferTyped(RBufferTyped<T>& rbufferTyped, size_t elementCount, VkBufferUsageFlags flags, VkMemoryPropertyFlags memFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-  {
-    rbufferTyped = createBuffer(sizeof(T) * elementCount, flags, memFlags);
-  }
-
-  RLargeBuffer createLargeBuffer(VkDeviceSize                 size,
-                                 VkBufferUsageFlags           flags,
-                                 VkMemoryPropertyFlags        memFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                 const std::vector<uint32_t>* sharingQueueFamilies = nullptr);
-
-  void destroy(RBuffer& obj);
-  void destroy(RLargeBuffer& obj);
-
-  nvvk::AccelKHR createAccelKHR(VkAccelerationStructureCreateInfoKHR& createInfo);
-  void           destroy(nvvk::AccelKHR& obj);
-
-  //////////////////////////////////////////////////////////////////////////
-
-  void simpleUploadBuffer(const RBuffer& dst, const void* src);
-  void simpleUploadBuffer(const RBuffer& dst, size_t offset, size_t sz, const void* src);
-  void simpleDownloadBuffer(void* dst, const RBuffer& src);
 
   //////////////////////////////////////////////////////////////////////////
 
   VkCommandBuffer createTempCmdBuffer();
-  void            tempSyncSubmit(VkCommandBuffer cmd, bool reset = true);
-  void            tempResetResources();
-
-  //////////////////////////////////////////////////////////////////////////
-
-  VkCommandBuffer createCmdBuffer(VkCommandPool pool, bool singleshot, bool primary, bool secondaryInClear, bool isCompute = false) const;
+  void            tempSyncSubmit(VkCommandBuffer cmd);
 
   //////////////////////////////////////////////////////////////////////////
 
@@ -319,12 +263,29 @@ public:
                          bool               hasSecondary = false,
                          VkAttachmentLoadOp loadOpColor  = VK_ATTACHMENT_LOAD_OP_CLEAR,
                          VkAttachmentLoadOp loadOpDepth  = VK_ATTACHMENT_LOAD_OP_CLEAR);
-  void cmdDynamicState(VkCommandBuffer cmd) const;
-  void cmdBegin(VkCommandBuffer cmd, bool singleshot, bool primary, bool secondaryInClear, bool isCompute = false) const;
+  void cmdBeginRayTracing(VkCommandBuffer cmd);
 
-  void cmdImageTransition(VkCommandBuffer cmd, RImage& img, VkImageAspectFlags aspects, VkImageLayout newLayout, bool needBarrier = false) const;
+  void cmdImageTransition(VkCommandBuffer cmd, nvvk::Image& rimg, VkImageAspectFlags aspects, VkImageLayout newLayout, bool needBarrier = false) const;
 
   //////////////////////////////////////////////////////////////////////////
+
+  void simpleUploadBuffer(const nvvk::Buffer& buffer, void* data)
+  {
+    VkCommandBuffer cmd = createTempCmdBuffer();
+    m_uploader.appendBuffer(buffer, 0, buffer.bufferSize, data);
+    m_uploader.cmdUploadAppended(cmd);
+    tempSyncSubmit(cmd);
+    m_uploader.releaseStaging();
+  }
+
+  void simpleUploadBuffer(const nvvk::Buffer& buffer, size_t offset, size_t sz, void* data)
+  {
+    VkCommandBuffer cmd = createTempCmdBuffer();
+    m_uploader.appendBuffer(buffer, offset, sz, data);
+    m_uploader.cmdUploadAppended(cmd);
+    tempSyncSubmit(cmd);
+    m_uploader.releaseStaging();
+  }
 
   enum FlushState
   {
@@ -341,12 +302,12 @@ public:
     {
     }
 
-    template <class T>
-    T* uploadBuffer(const RBuffer& dst, size_t offset, size_t sz, const T* src, FlushState flushState = FlushState::ALLOW_FLUSH)
+    template <typename T>
+    T* uploadBuffer(const nvvk::Buffer& dst, size_t offset, size_t sz, const T* src, FlushState flushState = FlushState::ALLOW_FLUSH)
     {
       if(sz)
       {
-        if(m_batchSize && m_batchSize + sz > m_maxBatchSize && flushState == FlushState::ALLOW_FLUSH)
+        if(m_resources.m_uploader.checkAppendedSize(m_maxBatchSize, sz) && flushState == FlushState::ALLOW_FLUSH)
         {
           flush();
         }
@@ -355,25 +316,32 @@ public:
         {
           m_cmd = m_resources.createTempCmdBuffer();
         }
+        T* mapping = nullptr;
+        NVVK_CHECK(m_resources.m_uploader.appendBufferMapping(dst, offset, sz, mapping));
 
-        m_batchSize += sz;
-        return static_cast<T*>(m_resources.m_allocator.getStaging()->cmdToBuffer(m_cmd, dst.buffer, offset, sz, src));
+        if(src)
+        {
+          memcpy(mapping, src, sz);
+        }
+
+        return mapping;
       }
       return nullptr;
     }
-    template <class T>
-    T* uploadBuffer(const RBuffer& dst, const T* src, FlushState flushState = FlushState::ALLOW_FLUSH)
+
+    template <typename T>
+    T* uploadBuffer(const nvvk::Buffer& dst, const T* src, FlushState flushState = FlushState::ALLOW_FLUSH)
     {
-      return uploadBuffer(dst, 0, dst.info.range, src, flushState);
+      return uploadBuffer(dst, 0, dst.bufferSize, src, flushState);
     }
 
-    void fillBuffer(const RBuffer& dst, uint32_t fillValue)
+    void fillBuffer(const nvvk::Buffer& dst, uint32_t fillValue)
     {
       if(!m_cmd)
       {
         m_cmd = m_resources.createTempCmdBuffer();
       }
-      vkCmdFillBuffer(m_cmd, dst.buffer, 0, dst.info.range, fillValue);
+      vkCmdFillBuffer(m_cmd, dst.buffer, 0, dst.bufferSize, fillValue);
     }
 
     // must call flush at end of operations
@@ -381,20 +349,62 @@ public:
     {
       if(m_cmd)
       {
+        m_resources.m_uploader.cmdUploadAppended(m_cmd);
         m_resources.tempSyncSubmit(m_cmd);
-        m_cmd       = nullptr;
-        m_batchSize = 0;
+        m_resources.m_uploader.releaseStaging();
+        m_cmd = nullptr;
       }
     }
 
-    ~BatchedUploader() { assert(!m_batchSize); }
+    ~BatchedUploader() { assert(!m_cmd && "must call flush at end"); }
 
   private:
     Resources&      m_resources;
     VkDeviceSize    m_maxBatchSize = 0;
-    VkDeviceSize    m_batchSize    = 0;
     VkCommandBuffer m_cmd          = nullptr;
   };
+
+  //////////////////////////////////////////////////////////////////////////
+
+  static constexpr VkPipelineStageFlags2 s_supportedShaderStages =
+      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT
+      | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+
+  VkDevice         m_device          = {};
+  VkPhysicalDevice m_physicalDevice  = {};
+  nvvk::QueueInfo  m_queue           = {};
+  VkCommandPool    m_tempCommandPool = {};
+
+  nvvk::ResourceAllocator m_allocator     = {};
+  nvvk::SamplerPool       m_samplerPool   = {};
+  VkSampler               m_samplerLinear = {};
+  nvvkglsl::GlslCompiler  m_glslCompiler  = {};
+  nvvk::StagingUploader   m_uploader      = {};
+
+  FrameBuffer m_frameBuffer;
+  struct CommonBuffers
+  {
+    nvvk::BufferTyped<shaderio::FrameConstants> frameConstants;
+    nvvk::BufferTyped<shaderio::Readback>       readBack;
+    nvvk::BufferTyped<shaderio::Readback>       readBackHost;
+  } m_commonBuffers;
+
+  PhysicalDeviceInfo          m_physicalDeviceInfo = {};
+  nvvk::GraphicsPipelineState m_basicGraphicsState = {};
+  uint32_t                    m_cycleIndex         = 0;
+  size_t                      m_fboChangeID        = ~0;
+  glm::vec4                   m_bgColor            = {0.1, 0.13, 0.15, 1.0};
+  bool                        m_supportsClusters   = false;
+
+  bool            m_hbaoFullRes = false;
+  HbaoPass        m_hbaoPass;
+  HbaoPass::Frame m_hbaoFrame;
+
+  NVHizVK                       m_hiz;
+  NVHizVK::Update               m_hizUpdate;
+  shaderc::SpvCompilationResult m_hizShaders[NVHizVK::SHADER_COUNT];
+
+private:
 };
 
 

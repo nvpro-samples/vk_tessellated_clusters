@@ -518,11 +518,11 @@ Flickering is expected to occur when the various intermediate data buffers do no
 The technology being quite new, we might not have ironed out all issues. If you experience instabilities, please let us know through GitHub Issues.
 You can use the commandline to change some defaults:
 
-* `-renderer 0` starts with rasterization.
-* `-supersample 0` disables the super sampling that otherwise doubles rendering resolution in each dimension. 
-* `-gridcopies N` set the number of model copies in the scene.
-* `-tessrate F` set the float value of the tessellation rate in pixels per segment. `0` to disable.
-* `-vsync 0` disable vsync. If changing vsync via UI does not work, try to use the driver's *NVIDIA Control Panel* and set `Vulkan/OpenGL present method: native`.
+* `--renderer 0` starts with rasterization.
+* `--supersample 0` disables the super sampling that otherwise doubles rendering resolution in each dimension. 
+* `--gridcopies N` set the number of model copies in the scene.
+* `--tessrate F` set the float value of the tessellation rate in pixels per segment. `0` to disable.
+* `--vsync 0` disable vsync. If changing vsync via UI does not work, try to use the driver's *NVIDIA Control Panel* and set `Vulkan/OpenGL present method: native`.
 
 ## Future Improvements
 
@@ -549,8 +549,8 @@ We recommend starting with a `Release` build, as the `Debug` build has a lot mor
 
 The cmake setup will download the `Stanford Bunny` glTF 2.0 model that serves as default scene.
 
-It will also look for [`nvpro_core`](https://github.com/nvpro-samples/nvpro_core) either as subdirectory of the current project directory, or up to two levels above. If it is not found, it will automatically download the git repo into `/build/_deps`.
-Note, that the repository of `nvpro_core` needs to be updated manually in case the sample is updated manually, as version mismatches could occur over time.
+It will also look for [`nvpro_core2`](https://github.com/nvpro-samples/nvpro_core2) either as subdirectory of the current project directory, or up to two levels above. If it is not found, it will automatically download the git repo into `/build/_deps`.
+Note, that the repository of `nvpro_core2` needs to be updated manually in case the sample is updated manually, as version mismatches could occur over time.
 
 The Vulkan validation layers may interfere with extensions it doesn't know about, therefore it is currently disabled in debug builds.
 This will be changed with future Vulkan SDKs.

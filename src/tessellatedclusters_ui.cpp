@@ -19,21 +19,18 @@
 
 #include <filesystem>
 
-#include <imgui/backends/imgui_vk_extra.h>
-#include <imgui/imgui_camera_widget.h>
-#include <imgui/imgui_orient.h>
-#include <implot.h>
-#include <nvh/fileoperations.hpp>
-#include <nvh/misc.hpp>
-#include <nvh/cameramanipulator.hpp>
-#include <nvvkhl/shaders/dh_sky.h>
-#include <glm/gtc/type_ptr.hpp>
-#include <glm/gtc/matrix_access.hpp>
+#include <imgui/imgui.h>
+#include <imgui/imgui_internal.h>
+#include <implot/implot.h>
+#include <nvgui/camera.hpp>
+#include <nvgui/sky.hpp>
+#include <nvgui/property_editor.hpp>
+#include <nvgui/window.hpp>
 
 #include "tessellatedclusters.hpp"
-#include "vk_nv_cluster_acc.h"
 
 namespace tessellatedclusters {
+
 
 std::string formatMemorySize(size_t sizeInBytes)
 {
@@ -75,6 +72,42 @@ std::string formatMetric(size_t size)
   return fmt::format("{:.3} {}", fsize, units[currentUnit]);
 }
 
+template <typename T>
+void uiPlot(std::string plotName, std::string tooltipFormat, const std::vector<T>& data, const T& maxValue)
+{
+  ImVec2 plotSize = ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetContentRegionAvail().y / 2);
+
+  // Ensure minimum height to avoid overly squished graphics
+  plotSize.y = std::max(plotSize.y, ImGui::GetTextLineHeight() * 20);
+
+  const ImPlotFlags     plotFlags = ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_Crosshairs;
+  const ImPlotAxisFlags axesFlags = ImPlotAxisFlags_Lock | ImPlotAxisFlags_NoLabel;
+  const ImColor         plotColor = ImColor(0.07f, 0.9f, 0.06f, 1.0f);
+
+  if(ImPlot::BeginPlot(plotName.c_str(), plotSize, plotFlags))
+  {
+    ImPlot::SetupLegend(ImPlotLocation_NorthWest, ImPlotLegendFlags_NoButtons);
+    ImPlot::SetupAxes(nullptr, "Count", axesFlags, axesFlags);
+    ImPlot::SetupAxesLimits(0, static_cast<double>(data.size()), 0, static_cast<double>(maxValue), ImPlotCond_Always);
+
+    ImPlot::PushStyleVar(ImPlotStyleVar_FillAlpha, 0.25f);
+    ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1);
+    ImPlot::SetNextFillStyle(plotColor);
+    ImPlot::PlotShaded("", data.data(), (int)data.size(), -INFINITY, 1.0, 0.0, 0, 0);
+    ImPlot::PopStyleVar();
+
+    if(ImPlot::IsPlotHovered())
+    {
+      ImPlotPoint mouse       = ImPlot::GetPlotMousePos();
+      int         mouseOffset = (int(mouse.x)) % (int)data.size();
+      ImGui::BeginTooltip();
+      ImGui::Text(tooltipFormat.c_str(), mouseOffset, data[mouseOffset]);
+      ImGui::EndTooltip();
+    }
+
+    ImPlot::EndPlot();
+  }
+}
 
 struct UsagePercentages
 {
@@ -142,20 +175,10 @@ struct UsagePercentages
 
 void TessellatedClusters::viewportUI(ImVec2 corner)
 {
-  if(ImGui::IsItemHovered())
-  {
-    const auto mouseAbsPos = ImGui::GetMousePos();
+  ImVec2     mouseAbsPos = ImGui::GetMousePos();
+  glm::uvec2 mousePos    = {mouseAbsPos.x - corner.x, mouseAbsPos.y - corner.y};
 
-    glm::uvec2 mousePos = {mouseAbsPos.x - corner.x, mouseAbsPos.y - corner.y};
-
-    m_frameConfig.frameConstants.mousePosition = mousePos * glm::uvec2(m_tweak.supersample, m_tweak.supersample);
-    m_mouseButtonHandler.update(mousePos);
-    MouseButtonHandler::ButtonState leftButtonState = m_mouseButtonHandler.getButtonState(ImGuiMouseButton_Left);
-    m_requestCameraRecenter = (leftButtonState == MouseButtonHandler::eDoubleClick) || ImGui::IsKeyPressed(ImGuiKey_Space);
-    /* JEM dactivates selection, TODO remove code once validated with CK
-    m_requestSelection = leftButtonState == MouseButtonHandler::eSingleClick;
-    */
-  }
+  m_frameConfig.frameConstants.mousePosition = mousePos * glm::uvec2(m_tweak.supersample, m_tweak.supersample);
 
   if(m_renderer)
   {
@@ -192,9 +215,28 @@ void TessellatedClusters::viewportUI(ImVec2 corner)
   }
 }
 
-void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const CallBacks& callbacks)
+void TessellatedClusters::onUIRender()
 {
-  if(!m_scene)
+  ImGuiWindow* viewport = ImGui::FindWindowByName("Viewport");
+
+  if(viewport)
+  {
+    if(nvgui::isWindowHovered(viewport))
+    {
+      if(ImGui::IsKeyDown(ImGuiKey_R))
+      {
+        m_reloadShaders = true;
+      }
+      if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || ImGui::IsKeyPressed(ImGuiKey_Space))
+      {
+        m_requestCameraRecenter = true;
+      }
+    }
+  }
+
+  bool earlyOut = !m_scene;
+
+  if(earlyOut)
   {
     return;
   }
@@ -202,35 +244,17 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
   shaderio::Readback readback;
   m_resources.getReadbackData(readback);
 
-  /* JEM dactivates selection, TODO remove code once validated with CK
-  bool isRightClick = m_mouseButtonHandler.getButtonState(ImGuiMouseButton_Right) == MouseButtonHandler::eSingleClick;
-
-  if(isRightClick || ImGui::IsKeyPressed(ImGuiKey_Escape))
-  {
-    m_hasSelection = false;
-  }
-
-  if(m_requestSelection)
-  {
-    m_selectionData = readback;
-    m_hasSelection  = isReadbackValid(readback);
-
-    m_frameConfig.frameConstants.visFilterClusterID  = m_selectionData.clusterTriangleId >> 8;
-    m_frameConfig.frameConstants.visFilterInstanceID = m_selectionData.instanceId;
-  }
-  */
-
-  if(m_requestCameraRecenter && isReadbackValid(readback))
+  // camera control, recenter
+  if(m_requestCameraRecenter && isPickingValid(readback))
   {
 
     glm::uvec2 mousePos = {m_frameConfig.frameConstants.mousePosition.x / m_tweak.supersample,
                            m_frameConfig.frameConstants.mousePosition.y / m_tweak.supersample};
 
-    const glm::mat4 view = CameraManip.getMatrix();
+    const glm::mat4 view = m_info.cameraManipulator->getViewMatrix();
     const glm::mat4 proj = m_frameConfig.frameConstants.projMatrix;
 
     float d = decodePickingDepth(readback);
-
 
     if(d < 1.0F)  // Ignore infinite
     {
@@ -240,19 +264,18 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
 
       // Set the interest position
       glm::vec3 eye, center, up;
-      CameraManip.getLookat(eye, center, up);
-      CameraManip.setLookat(eye, hitPos, up, false);
+      m_info.cameraManipulator->getLookat(eye, center, up);
+      m_info.cameraManipulator->setLookat(eye, hitPos, up, false);
     }
+
+    m_requestCameraRecenter = false;
   }
 
-  //
-  ImVec4 text_color = ImGui::GetStyleColorVec4(ImGuiCol_Text);
-  ImVec4 warn_color = text_color;
-  warn_color.y *= 0.5f;
-  warn_color.z *= 0.5f;
-
+  ImVec4 textColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
   // for emphasized parameter we want to recommend to the user
   const ImVec4 recommendedColor = ImVec4(0.0, 1.0, 0.0, 1.0);
+  // for warnings
+  const ImVec4 warnColor = ImVec4(1.0f, 0.7f, 0.3f, 1.0f);
 
   UsagePercentages pct;
   if(m_renderer)
@@ -261,15 +284,14 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
   }
 
   ImGui::Begin("Settings");
+  ImGui::PushItemWidth(170 * ImGui::GetWindowDpiScale());
 
-  ImGui::PushItemWidth(ImGuiH::dpiScaled(170));
-
-  namespace PE = ImGuiH::PropertyEditor;
+  namespace PE = nvgui::PropertyEditor;
 
   if(ImGui::CollapsingHeader("Scene Modifiers"))  //, nullptr, ImGuiTreeNodeFlags_DefaultOpen ))
   {
     PE::begin("##Scene Complexity");
-    PE::Checkbox("Flip faces winding", &m_tweak.flipWinding);
+    PE::Checkbox("Flip faces winding", &m_rendererConfig.flipWinding);
     PE::InputInt("Render grid copies", (int*)&m_tweak.gridCopies, 1, 16, ImGuiInputTextFlags_EnterReturnsTrue,
                  "Instances the entire scene on a grid");
     PE::InputInt("Render grid bits", (int*)&m_tweak.gridConfig, 1, 1, ImGuiInputTextFlags_EnterReturnsTrue,
@@ -282,7 +304,8 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
     PE::begin("##Rendering");
     PE::entry("Renderer", [&]() { return m_ui.enumCombobox(GUI_RENDERER, "renderer", &m_tweak.renderer); });
     PE::entry("Super sampling", [&]() { return m_ui.enumCombobox(GUI_SUPERSAMPLE, "##HiddenID", &m_tweak.supersample); });
-    PE::Text("Render Resolution:", "%d x %d", m_resources.m_framebuffer.renderWidth, m_resources.m_framebuffer.renderHeight);
+    PE::Text("Render Resolution:", "%d x %d", m_resources.m_frameBuffer.renderSize.width,
+             m_resources.m_frameBuffer.renderSize.height);
 
     ImGui::BeginDisabled(m_tweak.tessRatePixels != 0);
     m_tweak.facetShading = m_tweak.facetShading || (m_tweak.tessRatePixels != 0);
@@ -319,11 +342,10 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
       return m_ui.enumCombobox(GUI_VISUALIZE, "visualize", &m_tweak.visualizeMode);
     });
 
-    // End TODO
     PE::InputIntClamped("Max visible clusters in bits", (int*)&m_rendererConfig.numVisibleClusterBits, 16, 25, 1, 1,
                         ImGuiInputTextFlags_EnterReturnsTrue);
 
-    PE::Checkbox("Culling (Occlusion & Frustum)", &m_tweak.doCulling);
+    PE::Checkbox("Culling (Occlusion & Frustum)", &m_rendererConfig.doCulling);
 
     PE::Checkbox("Freeze Cull / LoD", &m_frameConfig.freezeCulling);
     PE::end();
@@ -338,10 +360,10 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
       ImGui::TableNextColumn();
       ImGui::Text("Visible Clusters");
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctVisible > 100 ? warn_color : text_color, "%s (%d%%)",
+      ImGui::TextColored(pct.pctVisible > 100 ? warnColor : textColor, "%s (%d%%)",
                          formatMetric(readback.numVisibleClusters).c_str(), pct.pctVisible);
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctVisible > 100 ? warn_color : text_color, "%d", readback.numVisibleClusters);
+      ImGui::TextColored(pct.pctVisible > 100 ? warnColor : textColor, "%d", readback.numVisibleClusters);
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
       ImGui::Text("Rendered triangles");
@@ -412,17 +434,17 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
       ImGui::TableNextColumn();
       ImGui::Text("CLAS vertex count");
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctVertices > 100 ? warn_color : text_color, "%s", formatMetric(readback.numGenVertices).c_str());
+      ImGui::TextColored(pct.pctVertices > 100 ? warnColor : textColor, "%s", formatMetric(readback.numGenVertices).c_str());
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctVertices > 100 ? warn_color : text_color, "%d%%", pct.pctVertices);
+      ImGui::TextColored(pct.pctVertices > 100 ? warnColor : textColor, "%d%%", pct.pctVertices);
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
       ImGui::Text("CLAS vertex bytes");
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctVertices > 100 ? warn_color : text_color, "%s",
+      ImGui::TextColored(pct.pctVertices > 100 ? warnColor : textColor, "%s",
                          formatMemorySize(sizeof(glm::vec3) * readback.numGenVertices).c_str());
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctVertices > 100 ? warn_color : text_color, "%d%%", pct.pctVertices);
+      ImGui::TextColored(pct.pctVertices > 100 ? warnColor : textColor, "%d%%", pct.pctVertices);
       ImGui::EndTable();
     }
   }
@@ -431,13 +453,9 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
   {
     PE::begin("##Tessellation");
     ImGui::PushStyleColor(ImGuiCol_Text, recommendedColor);
-    PE::entry(
-        "Pixels per segment",
-        [&]() {
-          ImGui::PopStyleColor();  // pop text color here so it only applies to the label
-          return ImGuiH::InputIntClamped("##hidden", &m_tweak.tessRatePixels, 0, 128, 1, 1, ImGuiInputTextFlags_EnterReturnsTrue);
-        },
-        "Set to 0 to disable tessellation");
+    PE::InputIntClamped("Pixels per segment", (int*)&m_tweak.tessRatePixels, 0, 128, 1, 1,
+                        ImGuiInputTextFlags_EnterReturnsTrue, "Set to 0 to disable tessellation");
+    ImGui::PopStyleColor();
     PE::Checkbox("PN-Triangles displacement", &m_rendererConfig.pnDisplacement);
     PE::InputIntClamped("Max part triangles in bits", (int*)&m_rendererConfig.numPartTriangleBits, 4, 24, 1, 1,
                         ImGuiInputTextFlags_EnterReturnsTrue);
@@ -455,23 +473,23 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
       ImGui::TableNextColumn();
       ImGui::Text("Full clusters");
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctFull > 100 ? warn_color : text_color, "%d", readback.numFullClusters);
+      ImGui::TextColored(pct.pctFull > 100 ? warnColor : textColor, "%d", readback.numFullClusters);
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctFull > 100 ? warn_color : text_color, "%d%%", pct.pctFull);
+      ImGui::TextColored(pct.pctFull > 100 ? warnColor : textColor, "%d%%", pct.pctFull);
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
       ImGui::Text("Part triangles");
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctPart > 100 ? warn_color : text_color, "%d", readback.numPartTriangles);
+      ImGui::TextColored(pct.pctPart > 100 ? warnColor : textColor, "%d", readback.numPartTriangles);
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctPart > 100 ? warn_color : text_color, "%d%%", pct.pctPart);
+      ImGui::TextColored(pct.pctPart > 100 ? warnColor : textColor, "%d%%", pct.pctPart);
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
       ImGui::Text("Split triangles");
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctSplit > 100 ? warn_color : text_color, "%d", readback.numSplitTriangles);
+      ImGui::TextColored(pct.pctSplit > 100 ? warnColor : textColor, "%d", readback.numSplitTriangles);
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctSplit > 100 ? warn_color : text_color, "%d%%", pct.pctSplit);
+      ImGui::TextColored(pct.pctSplit > 100 ? warnColor : textColor, "%d%%", pct.pctSplit);
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
       ImGui::EndTable();
@@ -483,10 +501,10 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
     PE::begin("##Animation");
 
     ImGui::PushStyleColor(ImGuiCol_Text, recommendedColor);
-    PE::Checkbox("Enable animation", &m_tweak.doAnimation);
+    PE::Checkbox("Enable animation", &m_rendererConfig.doAnimation);
     ImGui::PopStyleColor();
 
-    ImGui::BeginDisabled(!m_tweak.doAnimation);
+    ImGui::BeginDisabled(!m_rendererConfig.doAnimation);
     PE::SliderFloat("Override time value", &m_tweak.overrideTime, 0, 10.0f, "%0.3f", 0, "Set to 0 disables override");
     PE::SliderFloat("Ripple frequency", &m_frameConfig.frameConstants.animationRippleFrequency, 0.001f, 200.f);
     float amplitude = m_frameConfig.frameConstants.animationRippleAmplitude * 100;
@@ -511,8 +529,6 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
               [&]() { return m_ui.enumCombobox(GUI_MESHLET, "##HiddenID", &m_tweak.clusterConfig); });
     PE::Checkbox("Use NV cluster library", &m_sceneConfig.clusterNvLibrary,
                  "uses the nv_cluster_builder library, otherwise meshoptimizer");
-    PE::InputFloat("NV graph weight (WIP)", &m_sceneConfig.clusterNvGraphWeight, 0.01f, 0.01f, "%.3f",
-                   ImGuiInputTextFlags_EnterReturnsTrue, "non-zero weight makes use of triangle connectivity, otherwise disabled");
     PE::Checkbox("Optimize for triangle strips", &m_sceneConfig.clusterStripify,
                  "Re-order triangles within cluster optimizing for triangle strips");
     PE::InputIntClamped("CLAS Mantissa drop bits", (int*)&m_rendererConfig.positionTruncateBits, 0, 22, 1, 1,
@@ -522,6 +538,7 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
         [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##HiddenID", &m_tweak.clusterBuildMode); }, "Transient CLAS build mode");
     PE::end();
   }
+
   ImGui::End();
 
   ImGui::Begin("Statistics");
@@ -589,19 +606,19 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
       ImGui::TableNextColumn();
       ImGui::Text("BLAS");
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctBlas > 100 ? warn_color : text_color, "%s (%d%% used)",
+      ImGui::TextColored(pct.pctBlas > 100 ? warnColor : textColor, "%s (%d%% used)",
                          formatMemorySize(resourceActual.rtBlasMemBytes).c_str(), pct.pctBlas);
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctBlas > 100 ? warn_color : text_color, "%s",
+      ImGui::TextColored(pct.pctBlas > 100 ? warnColor : textColor, "%s",
                          formatMemorySize(resourceReserved.rtBlasMemBytes).c_str());
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
       ImGui::Text("CLAS");
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctClusterActual > 100 ? warn_color : text_color, "%s (%d%% used)",
+      ImGui::TextColored(pct.pctClusterActual > 100 ? warnColor : textColor, "%s (%d%% used)",
                          formatMemorySize(resourceActual.rtClasMemBytes).c_str(), pct.pctClusterActual);
       ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctClusterReserved > 100 ? warn_color : text_color, "%s (%d%% requested)",
+      ImGui::TextColored(pct.pctClusterReserved > 100 ? warnColor : textColor, "%s (%d%% requested)",
                          formatMemorySize(resourceReserved.rtClasMemBytes).c_str(), pct.pctClusterReserved);
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
@@ -616,10 +633,12 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
     }
   }
 
-  if(ImGui::CollapsingHeader("Model Clusters"))  // default closed on purpose
+  if(m_scene && ImGui::CollapsingHeader("Model Clusters"))
   {
+    ImGui::Text("Cluster max triangles: %d", m_scene->m_maxClusterTriangles);
+    ImGui::Text("Cluster max vertices: %d", m_scene->m_maxClusterVertices);
     ImGui::Text("Cluster count: %d", m_scene->m_numClusters);
-    ImGui::Text("Clusters with max (%d) triangles: %d (%.1f%%)", m_scene->m_config.clusterTriangles,
+    ImGui::Text("Clusters with config (%d) triangles: %d (%.1f%%)", m_scene->m_config.clusterTriangles,
                 m_scene->m_clusterTriangleHistogram.back(),
                 float(m_scene->m_clusterTriangleHistogram.back()) * 100.f / float(m_scene->m_numClusters));
 
@@ -634,20 +653,22 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
 
   if(ImGui::CollapsingHeader("Camera", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
   {
-    ImGuiH::CameraWidget();
+    nvgui::CameraWidget(m_info.cameraManipulator);
   }
 
   if(ImGui::CollapsingHeader("Lighting", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
   {
-    namespace PE = ImGuiH::PropertyEditor;
+    namespace PE = nvgui::PropertyEditor;
     PE::begin();
     PE::SliderFloat("Light Mixer", &m_frameConfig.frameConstants.lightMixer, 0.0f, 1.0f, "%.3f", 0,
                     "Mix between flashlight and sun light");
     PE::end();
     ImGui::TextDisabled("Sun & Sky");
-    PE::begin();
-    nvvkhl::skyParametersUI(m_frameConfig.frameConstants.skyParams);
-    PE::end();
+    {
+      PE::begin();
+      nvgui::skySimpleParametersUI(m_frameConfig.frameConstants.skyParams);
+      PE::end();
+    }
   }
 
   ImGui::End();
@@ -665,8 +686,10 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
 
   if(ImGui::CollapsingHeader("Debug Shader Values", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
   {
-    ImGui::InputInt("dbgInt", (int*)&m_frameConfig.frameConstants.dbgUint, 1, 100, ImGuiInputTextFlags_EnterReturnsTrue);
-    ImGui::InputFloat("dbgFloat", &m_frameConfig.frameConstants.dbgFloat, 0.1f, 1.0f, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue);
+    PE::begin("##HiddenID");
+    PE::InputInt("dbgInt", (int*)&m_frameConfig.frameConstants.dbgUint, 1, 100, ImGuiInputTextFlags_EnterReturnsTrue);
+    PE::InputFloat("dbgFloat", &m_frameConfig.frameConstants.dbgFloat, 0.1f, 1.0f, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue);
+    PE::end();
 
     ImGui::Text(" debugI :  %10d", readback.debugI);
     ImGui::Text(" debugUI:  %10u", readback.debugUI);
@@ -712,6 +735,15 @@ void TessellatedClusters::processUI(double time, nvh::Profiler& profiler, const 
   }
   ImGui::End();
 #endif
+
+  handleChanges();
+
+  // Rendered image displayed fully in 'Viewport' window
+  ImGui::Begin("Viewport");
+  ImVec2 corner = ImGui::GetCursorScreenPos();  // Corner of the viewport
+  ImGui::Image((ImTextureID)m_imguiTexture, ImGui::GetContentRegionAvail());
+  viewportUI(corner);
+  ImGui::End();
 }
 
 }  // namespace tessellatedclusters

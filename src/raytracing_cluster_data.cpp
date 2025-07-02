@@ -17,7 +17,9 @@
 * SPDX-License-Identifier: Apache-2.0
 */
 
-#include <nvh/parallel_work.hpp>
+#include <volk.h>
+
+#include <nvutils/parallel_work.hpp>
 
 #include "raytracing_cluster_data.hpp"
 
@@ -35,8 +37,8 @@ void RayTracingClusterData::initRayTracingTemplates(Resources& res, Scene& scene
   VkClusterAccelerationStructureTriangleClusterInputNV templateTriangleInput = {
       VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_TRIANGLE_CLUSTER_INPUT_NV};
   templateTriangleInput.vertexFormat                = VK_FORMAT_R32G32B32_SFLOAT;
-  templateTriangleInput.maxClusterTriangleCount     = scene.m_config.clusterTriangles;
-  templateTriangleInput.maxClusterVertexCount       = scene.m_config.clusterVertices;
+  templateTriangleInput.maxClusterTriangleCount     = scene.m_maxClusterTriangles;
+  templateTriangleInput.maxClusterVertexCount       = scene.m_maxClusterVertices;
   templateTriangleInput.maxTotalTriangleCount       = scene.m_maxPerGeometryTriangles;
   templateTriangleInput.maxTotalVertexCount         = scene.m_maxPerGeometryClusterVertices;
   templateTriangleInput.minPositionTruncateBitCount = config.positionTruncateBits;
@@ -59,29 +61,36 @@ void RayTracingClusterData::initRayTracingTemplates(Resources& res, Scene& scene
   vkGetClusterAccelerationStructureBuildSizesNV(res.m_device, &inputs, &sizesInfo);
   tempScratchSize = std::max(tempScratchSize, sizesInfo.buildScratchSize);
 
-  RBuffer scratchBuffer = res.createBuffer(tempScratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  nvvk::Buffer scratchBuffer;
+  res.m_allocator.createBuffer(scratchBuffer, tempScratchSize,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
 
   std::vector<VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV> templateInfos(scene.m_maxPerGeometryClusters);
   std::vector<VkClusterAccelerationStructureInstantiateClusterInfoNV> instantiateInfos(scene.m_maxPerGeometryClusters);
 
-  RBuffer templateInfosBuffer =
-      res.createBuffer(sizeof(VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV) * templateInfos.size(),
-                       VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  nvvk::Buffer templateInfosBuffer;
+  res.m_allocator.createBuffer(templateInfosBuffer,
+                               sizeof(VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV) * templateInfos.size(),
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, VMA_MEMORY_USAGE_CPU_ONLY,
+                               VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 
-  RBuffer instantiateInfosBuffer =
-      res.createBuffer(sizeof(VkClusterAccelerationStructureInstantiateClusterInfoNV) * instantiateInfos.size(),
-                       VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  nvvk::Buffer instantiateInfosBuffer;
+  res.m_allocator.createBuffer(instantiateInfosBuffer,
+                               sizeof(VkClusterAccelerationStructureInstantiateClusterInfoNV) * instantiateInfos.size(),
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, VMA_MEMORY_USAGE_CPU_ONLY,
+                               VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 
-  RBuffer sizesBuffer = res.createBuffer(sizeof(uint32_t) * instantiateInfos.size(),
-                                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  nvvk::Buffer sizesBuffer;
+  res.m_allocator.createBuffer(sizesBuffer, sizeof(uint32_t) * instantiateInfos.size(),
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VMA_MEMORY_USAGE_CPU_ONLY,
+                               VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 
-  RBuffer dstAddressesBuffer =
-      res.createBuffer(sizeof(uint64_t) * instantiateInfos.size(),
-                       VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  nvvk::Buffer dstAddressesBuffer;
+  res.m_allocator.createBuffer(dstAddressesBuffer, sizeof(uint64_t) * instantiateInfos.size(),
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VMA_MEMORY_USAGE_CPU_ONLY,
+                               VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 
 
   // 32 byte alignment requirement for bbox
@@ -90,9 +99,11 @@ void RayTracingClusterData::initRayTracingTemplates(Resources& res, Scene& scene
     shaderio::BBox bbox;
   };
 
-  RBuffer bboxesBuffer = res.createBuffer(sizeof(TemplateBbox) * instantiateInfos.size(),
-                                          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  nvvk::Buffer bboxesBuffer;
+
+  res.m_allocator.createBuffer(bboxesBuffer, sizeof(TemplateBbox) * instantiateInfos.size(),
+                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, VMA_MEMORY_USAGE_CPU_ONLY,
+                               VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
 
   for(size_t g = 0; g < scene.m_geometries.size(); g++)
   {
@@ -145,13 +156,13 @@ void RayTracingClusterData::initRayTracingTemplates(Resources& res, Scene& scene
     VkCommandBuffer cmd;
     VkClusterAccelerationStructureCommandsInfoNV cmdInfo = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_COMMANDS_INFO_NV};
     cmdInfo.srcInfosArray.deviceAddress     = templateInfosBuffer.address;
-    cmdInfo.srcInfosArray.size              = templateInfosBuffer.info.range;
+    cmdInfo.srcInfosArray.size              = templateInfosBuffer.bufferSize;
     cmdInfo.srcInfosArray.stride            = sizeof(VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV);
     cmdInfo.dstSizesArray.deviceAddress     = sizesBuffer.address;
-    cmdInfo.dstSizesArray.size              = sizesBuffer.info.range;
+    cmdInfo.dstSizesArray.size              = sizesBuffer.bufferSize;
     cmdInfo.dstSizesArray.stride            = sizeof(uint32_t);
     cmdInfo.dstAddressesArray.deviceAddress = dstAddressesBuffer.address;
-    cmdInfo.dstAddressesArray.size          = dstAddressesBuffer.info.range;
+    cmdInfo.dstAddressesArray.size          = dstAddressesBuffer.bufferSize;
     cmdInfo.dstAddressesArray.stride        = sizeof(uint64_t);
     cmdInfo.scratchData                     = scratchBuffer.address;
 
@@ -175,17 +186,16 @@ void RayTracingClusterData::initRayTracingTemplates(Resources& res, Scene& scene
       buildSum += ((const uint32_t*)sizesBuffer.mapping)[c];
     }
     // allocate outputs and setup dst addresses
-    geometryTemplate.templateData = res.createBuffer(buildSum, VK_BUFFER_USAGE_RAY_TRACING_BIT_NV);
-    m_resourceUsageInfo.rtTemplateMemBytes += geometryTemplate.templateData.info.range;
+    res.m_allocator.createBuffer(geometryTemplate.templateData, buildSum, VK_BUFFER_USAGE_RAY_TRACING_BIT_NV);
+    m_resourceUsageInfo.rtTemplateMemBytes += geometryTemplate.templateData.bufferSize;
 
-    geometryTemplate.templateInstantiationSizes =
-        res.createBuffer(sizeof(uint32_t) * numClusters, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-                                                             | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    m_resourceUsageInfo.operationsMemBytes += geometryTemplate.templateInstantiationSizes.info.range;
-    geometryTemplate.templateAddresses =
-        res.createBuffer(sizeof(uint64_t) * numClusters, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-                                                             | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    m_resourceUsageInfo.operationsMemBytes += geometryTemplate.templateAddresses.info.range;
+    res.m_allocator.createBuffer(geometryTemplate.templateInstantiationSizes, sizeof(uint32_t) * numClusters,
+                                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    m_resourceUsageInfo.operationsMemBytes += geometryTemplate.templateInstantiationSizes.bufferSize;
+
+    res.m_allocator.createBuffer(geometryTemplate.templateAddresses, sizeof(uint64_t) * numClusters,
+                                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    m_resourceUsageInfo.operationsMemBytes += geometryTemplate.templateAddresses.bufferSize;
 
     {
       uint64_t* dstAddresses = ((uint64_t*)dstAddressesBuffer.mapping);
@@ -230,7 +240,7 @@ void RayTracingClusterData::initRayTracingTemplates(Resources& res, Scene& scene
     inputs.flags  = 0;
 
     cmdInfo.srcInfosArray.deviceAddress     = instantiateInfosBuffer.address;
-    cmdInfo.srcInfosArray.size              = instantiateInfosBuffer.info.range;
+    cmdInfo.srcInfosArray.size              = instantiateInfosBuffer.bufferSize;
     cmdInfo.srcInfosArray.stride            = sizeof(VkClusterAccelerationStructureInstantiateClusterInfoNV);
     cmdInfo.dstAddressesArray.deviceAddress = 0;
     cmdInfo.dstAddressesArray.size          = 0;
@@ -261,12 +271,12 @@ void RayTracingClusterData::initRayTracingTemplates(Resources& res, Scene& scene
   }
 
   // delete temp resources
-  res.destroy(scratchBuffer);
-  res.destroy(templateInfosBuffer);
-  res.destroy(instantiateInfosBuffer);
-  res.destroy(sizesBuffer);
-  res.destroy(dstAddressesBuffer);
-  res.destroy(bboxesBuffer);
+  res.m_allocator.destroyBuffer(scratchBuffer);
+  res.m_allocator.destroyBuffer(templateInfosBuffer);
+  res.m_allocator.destroyBuffer(instantiateInfosBuffer);
+  res.m_allocator.destroyBuffer(sizesBuffer);
+  res.m_allocator.destroyBuffer(dstAddressesBuffer);
+  res.m_allocator.destroyBuffer(bboxesBuffer);
 }
 
 void RayTracingClusterData::initRayTracingInstantiations(Resources& res, Scene& scene, const RendererConfig& config)
@@ -292,14 +302,14 @@ bool RayTracingClusterData::init(Resources& res, Scene& scene, const RendererCon
   VkPhysicalDeviceClusterAccelerationStructurePropertiesNV clusterProps = {
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CLUSTER_ACCELERATION_STRUCTURE_PROPERTIES_NV};
   props2.pNext = &clusterProps;
-  vkGetPhysicalDeviceProperties2(res.m_physical, &props2);
+  vkGetPhysicalDeviceProperties2(res.m_physicalDevice, &props2);
 
   // used for cluster builds or instantiations
   // which do entire scene at once
   m_clusterTriangleInput              = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_TRIANGLE_CLUSTER_INPUT_NV};
   m_clusterTriangleInput.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-  m_clusterTriangleInput.maxClusterTriangleCount       = scene.m_config.clusterTriangles;
-  m_clusterTriangleInput.maxClusterVertexCount         = scene.m_config.clusterVertices;
+  m_clusterTriangleInput.maxClusterTriangleCount       = scene.m_maxClusterTriangles;
+  m_clusterTriangleInput.maxClusterVertexCount         = scene.m_maxClusterVertices;
   m_clusterTriangleInput.maxTotalTriangleCount         = 0;
   m_clusterTriangleInput.maxTotalVertexCount           = 0;
   m_clusterTriangleInput.minPositionTruncateBitCount   = config.positionTruncateBits;
@@ -339,15 +349,15 @@ bool RayTracingClusterData::init(Resources& res, Scene& scene, const RendererCon
   if(config.transientClusters1X || m_config.transientClusters2X)
   {
     // we overlap two operations when building transient clusters, ensure m_scratchSize is properly aligned
-    m_scratchSize = nvh::align_up(m_scratchSize, VkDeviceSize(clusterProps.clusterScratchByteAlignment));
+    m_scratchSize = nvutils::align_up(m_scratchSize, VkDeviceSize(clusterProps.clusterScratchByteAlignment));
     // and then double the size we request (this is very conservative)
     scratchBufferActualSize = m_scratchSize * 2;
   }
 
-  m_scratchBuffer = res.createBuffer(scratchBufferActualSize,
-                                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-                                         | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-  m_resourceUsageInfo.operationsMemBytes += m_scratchBuffer.info.range;
+  res.m_allocator.createBuffer(m_scratchBuffer, scratchBufferActualSize,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+                                   | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+  m_resourceUsageInfo.operationsMemBytes += m_scratchBuffer.bufferSize;
 
   {
     m_maxClusterSizes.resize(scene.m_config.clusterTriangles + 1, 0);
@@ -358,9 +368,9 @@ bool RayTracingClusterData::init(Resources& res, Scene& scene, const RendererCon
           VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_TRIANGLE_CLUSTER_INPUT_NV};
       triangleInput.vertexFormat                  = VK_FORMAT_R32G32B32_SFLOAT;
       triangleInput.maxClusterTriangleCount       = t;
-      triangleInput.maxClusterVertexCount         = scene.m_config.clusterVertices;
+      triangleInput.maxClusterVertexCount         = scene.m_maxClusterTriangles;
       triangleInput.maxTotalTriangleCount         = t;
-      triangleInput.maxTotalVertexCount           = scene.m_config.clusterVertices;
+      triangleInput.maxTotalVertexCount           = scene.m_maxClusterVertices;
       triangleInput.minPositionTruncateBitCount   = config.positionTruncateBits;
       triangleInput.maxClusterUniqueGeometryCount = 1;
 
@@ -384,12 +394,12 @@ void RayTracingClusterData::deinit(Resources& res)
 {
   for(auto& it : m_geometryTemplates)
   {
-    res.destroy(it.templateData);
-    res.destroy(it.templateAddresses);
-    res.destroy(it.templateInstantiationSizes);
+    res.m_allocator.destroyBuffer(it.templateData);
+    res.m_allocator.destroyBuffer(it.templateAddresses);
+    res.m_allocator.destroyBuffer(it.templateInstantiationSizes);
   }
 
-  res.destroy(m_scratchBuffer);
+  res.m_allocator.destroyBuffer(m_scratchBuffer);
 }
 
 void RayTracingClusterData::initRayTracingBlas(Resources& res, Scene& scene, const RendererConfig& config, uint32_t maxPerGeometryClusters)

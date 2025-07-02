@@ -17,15 +17,14 @@
 * SPDX-License-Identifier: Apache-2.0
 */
 
-#include <nvvk/raytraceKHR_vk.hpp>
-#include <nvvk/sbtwrapper_vk.hpp>
-#include <nvvkhl/pipeline_container.hpp>
-#include <nvvk/images_vk.hpp>
-#include <nvh/parallel_work.hpp>
-#include <nvh/misc.hpp>
+#include <volk.h>
+
+#include <nvvk/acceleration_structures.hpp>
+#include <nvvk/sbt_generator.hpp>
+#include <nvvk/commands.hpp>
+#include <fmt/format.h>
 
 #include "renderer.hpp"
-#include "vk_nv_cluster_acc.h"
 #include "raytracing_cluster_data.hpp"
 
 //////////////////////////////////////////////////////////////////////////
@@ -41,7 +40,7 @@ public:
   }
 
   virtual bool init(Resources& res, Scene& scene, const RendererConfig& config) override;
-  virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler) override;
+  virtual void render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler) override;
   virtual void deinit(Resources& res) override;
   virtual void updatedFrameBuffer(Resources& res);
 
@@ -54,23 +53,23 @@ private:
 
   struct Shaders
   {
-    nvvk::ShaderModuleID rayGen;
-    nvvk::ShaderModuleID closestHit;
-    nvvk::ShaderModuleID miss;
-    nvvk::ShaderModuleID missAO;
-
-    nvvk::ShaderModuleID computeInstancesClassify;
-    nvvk::ShaderModuleID computeClustersCull;
-    nvvk::ShaderModuleID computeClusterClassify;
-    nvvk::ShaderModuleID computeTriangleInstantiate;
-    nvvk::ShaderModuleID computeTriangleSplit;
-    nvvk::ShaderModuleID computeBlasClustersInsert;
-    nvvk::ShaderModuleID computeBlasSetup;
-    nvvk::ShaderModuleID computeBuildSetup;
+    shaderc::SpvCompilationResult rayGen;
+    shaderc::SpvCompilationResult rayClosestHit;
+    shaderc::SpvCompilationResult rayMiss;
+    shaderc::SpvCompilationResult rayMissAO;
+    shaderc::SpvCompilationResult computeInstancesClassify;
+    shaderc::SpvCompilationResult computeClustersCull;
+    shaderc::SpvCompilationResult computeClusterClassify;
+    shaderc::SpvCompilationResult computeTriangleInstantiate;
+    shaderc::SpvCompilationResult computeTriangleSplit;
+    shaderc::SpvCompilationResult computeBlasClustersInsert;
+    shaderc::SpvCompilationResult computeBlasSetup;
+    shaderc::SpvCompilationResult computeBuildSetup;
   };
 
   struct Pipelines
   {
+    VkPipeline rayTracing                 = nullptr;
     VkPipeline computeInstancesClassify   = nullptr;
     VkPipeline computeClustersCull        = nullptr;
     VkPipeline computeClusterClassify     = nullptr;
@@ -83,25 +82,28 @@ private:
 
   RendererConfig m_config;
 
-  Shaders                      m_shaders;
-  VkShaderStageFlags           m_stageFlags{};
-  Pipelines                    m_pipelines;
-  nvvk::DescriptorSetContainer m_dsetContainer;
+  Shaders   m_shaders;
+  Pipelines m_pipelines;
+
+  VkShaderStageFlags   m_stageFlags;
+  VkPipelineLayout     m_pipelineLayout{};
+  nvvk::DescriptorPack m_dsetPack;
 
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
-  nvvk::SBTWrapper          m_rtSbt;   // Shading binding table wrapper
-  nvvkhl::PipelineContainer m_rtPipe;  // Hold pipelines and layout
+
+  nvvk::SBTGenerator::Regions m_sbtRegions;
+  nvvk::Buffer                m_sbtBuffer;
 
   uint32_t m_maxGeneratedClusters = 0;
   uint32_t m_maxVisibleClusters   = 0;
 
   bool m_buildTlas = true;
 
-  RBuffer                 m_sceneBuildBuffer;
-  RBuffer                 m_sceneDataBuffer;
-  RLargeBuffer            m_sceneBlasDataBuffer;
-  RLargeBuffer            m_sceneClasDataBuffer;
-  RBuffer                 m_sceneSplitBuffer;
+  nvvk::Buffer            m_sceneBuildBuffer;
+  nvvk::Buffer            m_sceneDataBuffer;
+  nvvk::LargeBuffer       m_sceneBlasDataBuffer;
+  nvvk::LargeBuffer       m_sceneClasDataBuffer;
+  nvvk::Buffer            m_sceneSplitBuffer;
   shaderio::SceneBuilding m_sceneBuildShaderio{};
 
   TessellationTable     m_tessTable;
@@ -110,49 +112,45 @@ private:
 
 bool RendererRayTraceClustersTess::initShaders(Resources& res, Scene& scene, const RendererConfig& config)
 {
-  std::string prepend;
-  prepend += nvh::stringFormat("#define CLUSTER_VERTEX_COUNT %d\n", shaderio::adjustClusterProperty(scene.m_config.clusterVertices));
-  prepend += nvh::stringFormat("#define CLUSTER_TRIANGLE_COUNT %d\n",
-                               shaderio::adjustClusterProperty(scene.m_config.clusterTriangles));
-  prepend += nvh::stringFormat("#define TESSTABLE_SIZE %d\n", m_tessTable.m_maxSize);
-  prepend += nvh::stringFormat("#define TESSTABLE_LOOKUP_SIZE %d\n", m_tessTable.m_maxSizeConfigs);
-  prepend += nvh::stringFormat("#define TARGETS_RASTERIZATION %d\n", 0);
-  prepend += nvh::stringFormat("#define TESS_USE_PN %d\n", config.pnDisplacement ? 1 : 0);
-  prepend += nvh::stringFormat("#define TESS_USE_1X_TRANSIENTBUILDS %d\n", config.transientClusters1X ? 1 : 0);
-  prepend += nvh::stringFormat("#define TESS_USE_2X_TRANSIENTBUILDS %d\n", config.transientClusters2X ? 1 : 0);
-  prepend += nvh::stringFormat("#define TESS_ACTIVE %d\n", 1);
-  prepend += nvh::stringFormat("#define MAX_PART_TRIANGLES %d\n", 1 << config.numPartTriangleBits);
-  prepend += nvh::stringFormat("#define MAX_VISIBLE_CLUSTERS %d\n", 1 << config.numVisibleClusterBits);
-  prepend += nvh::stringFormat("#define MAX_SPLIT_TRIANGLES %d\n", 1 << config.numSplitTriangleBits);
-  prepend += nvh::stringFormat("#define MAX_GENERATED_CLUSTER_MEGS %d\n", uint32_t(config.numGeneratedClusterMegs));
-  prepend += nvh::stringFormat("#define MAX_GENERATED_CLUSTERS %d\n", m_maxGeneratedClusters);
-  prepend += nvh::stringFormat("#define MAX_GENERATED_VERTICES %d\n", 1 << config.numGeneratedVerticesBits);
-  prepend += nvh::stringFormat("#define HAS_DISPLACEMENT_TEXTURES %d\n", scene.m_textureImages.size() ? 1 : 0);
+  shaderc::CompileOptions options = res.makeCompilerOptions();
 
-  m_shaders.rayGen = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_RAYGEN_BIT_KHR, "render_raytrace.rgen.glsl");
-  m_shaders.closestHit = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
-                                                                "render_raytrace_clusters.rchit.glsl", prepend);
-  m_shaders.miss   = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl",
-                                                            "#define RAYTRACING_PAYLOAD_INDEX 0\n");
-  m_shaders.missAO = res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl",
-                                                            "#define RAYTRACING_PAYLOAD_INDEX 1\n");
+  options.AddMacroDefinition("CLUSTER_VERTEX_COUNT", fmt::format("{}", scene.m_maxClusterVertices));
+  options.AddMacroDefinition("CLUSTER_TRIANGLE_COUNT", fmt::format("{}", scene.m_maxClusterTriangles));
+  options.AddMacroDefinition("TESSTABLE_SIZE", fmt::format("{}", m_tessTable.m_maxSize));
+  options.AddMacroDefinition("TESSTABLE_LOOKUP_SIZE", fmt::format("{}", m_tessTable.m_maxSizeConfigs));
+  options.AddMacroDefinition("TARGETS_RASTERIZATION", fmt::format("{}", 0));
+  options.AddMacroDefinition("TESS_USE_PN", fmt::format("{}", config.pnDisplacement ? 1 : 0));
+  options.AddMacroDefinition("TESS_USE_1X_TRANSIENTBUILDS", fmt::format("{}", config.transientClusters1X ? 1 : 0));
+  options.AddMacroDefinition("TESS_USE_2X_TRANSIENTBUILDS", fmt::format("{}", config.transientClusters2X ? 1 : 0));
+  options.AddMacroDefinition("TESS_ACTIVE", fmt::format("{}", 1));
+  options.AddMacroDefinition("MAX_PART_TRIANGLES", fmt::format("{}", 1 << config.numPartTriangleBits));
+  options.AddMacroDefinition("MAX_VISIBLE_CLUSTERS", fmt::format("{}", 1 << config.numVisibleClusterBits));
+  options.AddMacroDefinition("MAX_SPLIT_TRIANGLES", fmt::format("{}", 1 << config.numSplitTriangleBits));
+  options.AddMacroDefinition("MAX_GENERATED_CLUSTER_MEGS", fmt::format("{}", uint32_t(config.numGeneratedClusterMegs)));
+  options.AddMacroDefinition("MAX_GENERATED_CLUSTERS", fmt::format("{}", m_maxGeneratedClusters));
+  options.AddMacroDefinition("MAX_GENERATED_VERTICES", fmt::format("{}", 1 << config.numGeneratedVerticesBits));
+  options.AddMacroDefinition("HAS_DISPLACEMENT_TEXTURES", fmt::format("{}", scene.m_textureImages.size() ? 1 : 0));
+  options.AddMacroDefinition("DO_CULLING", fmt::format("{}", config.doCulling ? 1 : 0));
+  options.AddMacroDefinition("DO_ANIMATION", fmt::format("{}", config.doAnimation ? 1 : 0));
+  options.AddMacroDefinition("DEBUG_VISUALIZATION", fmt::format("{}", config.debugVisualization ? 1 : 0));
 
-  m_shaders.computeInstancesClassify =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "instances_classify.comp.glsl", prepend);
-  m_shaders.computeClustersCull =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "clusters_cull.comp.glsl", prepend);
-  m_shaders.computeTriangleInstantiate =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "triangle_tess_template_instantiate.comp.glsl", prepend);
-  m_shaders.computeBlasClustersInsert =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "blas_clusters_insert.comp.glsl", prepend);
-  m_shaders.computeBlasSetup =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "blas_setup_insertion.comp.glsl", prepend);
-  m_shaders.computeBuildSetup =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "build_setup.comp.glsl", prepend);
-  m_shaders.computeClusterClassify =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "cluster_classify.comp.glsl", prepend);
-  m_shaders.computeTriangleSplit =
-      res.m_shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, "triangle_split.comp.glsl", prepend);
+  shaderc::CompileOptions optionsAO = options;
+  options.AddMacroDefinition("RAYTRACING_PAYLOAD_INDEX", "0");
+  optionsAO.AddMacroDefinition("RAYTRACING_PAYLOAD_INDEX", "1");
+
+  res.compileShader(m_shaders.rayGen, VK_SHADER_STAGE_RAYGEN_BIT_KHR, "render_raytrace.rgen.glsl", &options);
+  res.compileShader(m_shaders.rayClosestHit, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, "render_raytrace_clusters.rchit.glsl", &options);
+  res.compileShader(m_shaders.rayMiss, VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl", &options);
+  res.compileShader(m_shaders.rayMissAO, VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl", &optionsAO);
+  res.compileShader(m_shaders.computeInstancesClassify, VK_SHADER_STAGE_COMPUTE_BIT, "instances_classify.comp.glsl", &options);
+  res.compileShader(m_shaders.computeClustersCull, VK_SHADER_STAGE_COMPUTE_BIT, "clusters_cull.comp.glsl", &options);
+  res.compileShader(m_shaders.computeTriangleInstantiate, VK_SHADER_STAGE_COMPUTE_BIT,
+                    "triangle_tess_template_instantiate.comp.glsl", &options);
+  res.compileShader(m_shaders.computeBlasClustersInsert, VK_SHADER_STAGE_COMPUTE_BIT, "blas_clusters_insert.comp.glsl", &options);
+  res.compileShader(m_shaders.computeBlasSetup, VK_SHADER_STAGE_COMPUTE_BIT, "blas_setup_insertion.comp.glsl", &options);
+  res.compileShader(m_shaders.computeBuildSetup, VK_SHADER_STAGE_COMPUTE_BIT, "build_setup.comp.glsl", &options);
+  res.compileShader(m_shaders.computeClusterClassify, VK_SHADER_STAGE_COMPUTE_BIT, "cluster_classify.comp.glsl", &options);
+  res.compileShader(m_shaders.computeTriangleSplit, VK_SHADER_STAGE_COMPUTE_BIT, "triangle_split.comp.glsl", &options);
 
   if(!res.verifyShaders(m_shaders))
   {
@@ -170,9 +168,9 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
   m_maxVisibleClusters   = 1u << config.numVisibleClusterBits;
 
   m_tessTable.init(res, true, m_config.positionTruncateBits);
-  m_resourceReservedUsage.rtTemplateMemBytes += m_tessTable.m_templateData.info.range;
-  m_resourceReservedUsage.operationsMemBytes += m_tessTable.m_templateAddresses.info.range;
-  m_resourceReservedUsage.operationsMemBytes += m_tessTable.m_templateInstantiationSizes.info.range;
+  m_resourceReservedUsage.rtTemplateMemBytes += m_tessTable.m_templateData.bufferSize;
+  m_resourceReservedUsage.operationsMemBytes += m_tessTable.m_templateAddresses.bufferSize;
+  m_resourceReservedUsage.operationsMemBytes += m_tessTable.m_templateInstantiationSizes.bufferSize;
 
   if(!initShaders(res, scene, config))
   {
@@ -187,7 +185,7 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CLUSTER_ACCELERATION_STRUCTURE_PROPERTIES_NV};
   propCluster.pNext = &m_rtProperties;
   prop2.pNext       = &propCluster;
-  vkGetPhysicalDeviceProperties2(res.m_physical, &prop2);
+  vkGetPhysicalDeviceProperties2(res.m_physicalDevice, &prop2);
 
   if(!initRayTracingScene(res, scene, config))
   {
@@ -197,8 +195,9 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
   }
 
   {
-    m_sceneBuildBuffer = res.createBuffer(sizeof(shaderio::SceneBuilding), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
-                                                                               | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+    res.m_allocator.createBuffer(m_sceneBuildBuffer, sizeof(shaderio::SceneBuilding),
+                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+                                     | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
 
     memset(&m_sceneBuildShaderio, 0, sizeof(m_sceneBuildShaderio));
     m_sceneBuildShaderio.numRenderInstances   = uint32_t(m_renderInstances.size());
@@ -228,10 +227,10 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
     }
     rangesBlas.endOverlap();
 
-    m_sceneBlasDataBuffer =
-        res.createLargeBuffer(rangesBlas.tempOffset, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                         | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
-    m_resourceReservedUsage.rtBlasMemBytes += m_sceneBlasDataBuffer.info.range;
+    res.m_allocator.createLargeBuffer(m_sceneBlasDataBuffer, rangesBlas.tempOffset,
+                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+                                      res.m_queue.queue);
+    m_resourceReservedUsage.rtBlasMemBytes += m_sceneBlasDataBuffer.bufferSize;
 
     m_sceneBuildShaderio.blasBuildData += m_sceneBlasDataBuffer.address;
     m_sceneBuildShaderio.genVertices += m_sceneBlasDataBuffer.address;
@@ -269,9 +268,9 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
       m_sceneBuildShaderio.basicClusterSizes = rangesScene.append(sizeof(uint32_t) * m_cluster.m_maxClusterSizes.size(), 4);
     }
 
-    m_sceneDataBuffer = res.createBuffer(rangesScene.tempOffset, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                                                     | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
-    m_resourceReservedUsage.operationsMemBytes += m_sceneDataBuffer.info.range;
+    res.m_allocator.createBuffer(m_sceneDataBuffer, rangesScene.tempOffset,
+                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
+    m_resourceReservedUsage.operationsMemBytes += m_sceneDataBuffer.bufferSize;
 
     m_sceneBuildShaderio.instanceStates += m_sceneDataBuffer.address;
     m_sceneBuildShaderio.visibleClusters += m_sceneDataBuffer.address;
@@ -290,125 +289,112 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
     }
 
     // clas data buffer
-    m_sceneClasDataBuffer =
-        res.createLargeBuffer(size_t(config.numGeneratedClusterMegs) * 1024 * 1024,
-                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
-    m_resourceReservedUsage.rtClasMemBytes += m_sceneClasDataBuffer.info.range;
+    res.m_allocator.createLargeBuffer(m_sceneClasDataBuffer, size_t(config.numGeneratedClusterMegs) * 1024 * 1024,
+                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+                                      res.m_queue.queue);
+    m_resourceReservedUsage.rtClasMemBytes += m_sceneClasDataBuffer.bufferSize;
 
     m_sceneBuildShaderio.genClusterData = m_sceneClasDataBuffer.address;
 
     // the buffer that contains recursive splitting information
-    m_sceneSplitBuffer = res.createBuffer(sizeof(shaderio::TessTriangleInfo) * uint32_t(1 << config.numSplitTriangleBits),
-                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    m_resourceReservedUsage.operationsMemBytes += m_sceneSplitBuffer.info.range;
+    res.m_allocator.createBuffer(m_sceneSplitBuffer, sizeof(shaderio::TessTriangleInfo) * uint32_t(1 << config.numSplitTriangleBits),
+                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    m_resourceReservedUsage.operationsMemBytes += m_sceneSplitBuffer.bufferSize;
 
     m_sceneBuildShaderio.splitTriangles = m_sceneSplitBuffer.address;
   }
 
   {
-    m_dsetContainer.init(res.m_device);
-
     m_stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR
                    | VK_SHADER_STAGE_COMPUTE_BIT;
 
-    m_dsetContainer.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_TESSTABLE_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_SCENEBUILDING_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_SCENEBUILDING_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_HIZ_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_TLAS, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_RENDER_TARGET, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, m_stageFlags);
-    m_dsetContainer.addBinding(BINDINGS_RAYTRACING_DEPTH, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_TESSTABLE_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_SCENEBUILDING_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_SCENEBUILDING_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_HIZ_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_TLAS, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_RENDER_TARGET, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, m_stageFlags);
+    m_dsetPack.bindings.addBinding(BINDINGS_RAYTRACING_DEPTH, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, m_stageFlags);
 
     const uint32_t numDisplacedTextures = uint32_t(scene.m_textureImages.size());
     if(numDisplacedTextures > 0)
     {
-      m_dsetContainer.addBinding(BINDINGS_DISPLACED_TEXTURES, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                 numDisplacedTextures, m_stageFlags);
+      m_dsetPack.bindings.addBinding(BINDINGS_DISPLACED_TEXTURES, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                     numDisplacedTextures, m_stageFlags);
     }
 
-    m_dsetContainer.initLayout();
+    m_dsetPack.initFromBindings(res.m_device);
+    nvvk::createPipelineLayout(res.m_device, &m_pipelineLayout, {m_dsetPack.layout}, {{m_stageFlags, 0, sizeof(uint32_t)}});
 
-    VkPushConstantRange pushRange;
-    pushRange.offset     = 0;
-    pushRange.size       = sizeof(uint32_t);
-    pushRange.stageFlags = m_stageFlags;
-    m_dsetContainer.initPipeLayout(1, &pushRange);
-
-    m_dsetContainer.initPool(1);
-    std::vector<VkWriteDescriptorSet> writeSets;
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_FRAME_UBO, &res.m_common.view.info));
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_TESSTABLE_UBO, &m_tessTable.m_ubo.info));
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_READBACK_SSBO, &res.m_common.readbackDevice.info));
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_RENDERINSTANCES_SSBO, &m_renderInstanceBuffer.info));
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_SCENEBUILDING_SSBO, &m_sceneBuildBuffer.info));
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_SCENEBUILDING_UBO, &m_sceneBuildBuffer.info));
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_HIZ_TEX, &res.m_hizUpdate.farImageInfo));
-
-    VkWriteDescriptorSetAccelerationStructureKHR accelInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
-    accelInfo.accelerationStructureCount = 1;
-    VkAccelerationStructureKHR accel     = m_tlas.accel;
-    accelInfo.pAccelerationStructures    = &accel;
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_TLAS, &accelInfo));
+    nvvk::WriteSetContainer writeSets;
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_FRAME_UBO), res.m_commonBuffers.frameConstants);
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_TESSTABLE_UBO), m_tessTable.m_ubo);
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_READBACK_SSBO), res.m_commonBuffers.readBack);
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_RENDERINSTANCES_SSBO), m_renderInstanceBuffer);
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_SCENEBUILDING_SSBO), m_sceneBuildBuffer);
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_SCENEBUILDING_UBO), m_sceneBuildBuffer);
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_HIZ_TEX), res.m_hizUpdate.farImageInfo);
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_TLAS), m_tlas);
 
     VkDescriptorImageInfo renderTargetInfo;
     renderTargetInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    renderTargetInfo.imageView   = res.m_framebuffer.viewColor;
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_RENDER_TARGET, &renderTargetInfo));
+    renderTargetInfo.imageView   = res.m_frameBuffer.imgColor.descriptor.imageView;
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_RENDER_TARGET), &renderTargetInfo);
 
-    VkDescriptorImageInfo raytracingDepthInfo;
-    raytracingDepthInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    raytracingDepthInfo.imageView   = res.m_framebuffer.viewRaytracingDepth;
-    writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_RAYTRACING_DEPTH, &raytracingDepthInfo));
+    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_RAYTRACING_DEPTH), res.m_frameBuffer.imgRaytracingDepth.descriptor);
 
-    std::vector<VkDescriptorImageInfo> imageInfo;
-    imageInfo.reserve(numDisplacedTextures + writeSets.size());
     if(numDisplacedTextures > 0)
     {
-      for(const nvvk::Texture& texture : scene.m_textureImages)  // All texture samplers
+      std::vector<VkDescriptorImageInfo> imageInfo;
+      imageInfo.reserve(numDisplacedTextures + writeSets.size());
+      for(const nvvk::Image& texture : scene.m_textureImages)
       {
-        imageInfo.emplace_back(texture.descriptor);
+        VkDescriptorImageInfo descriptor = texture.descriptor;
+        descriptor.sampler               = res.m_samplerLinear;
+        imageInfo.emplace_back(descriptor);
       }
-      writeSets.push_back(m_dsetContainer.makeWrite(0, BINDINGS_DISPLACED_TEXTURES, imageInfo.data()));
+      writeSets.append(m_dsetPack.getWriteSet(BINDINGS_DISPLACED_TEXTURES), imageInfo.data());
     }
 
-    vkUpdateDescriptorSets(res.m_device, uint32_t(writeSets.size()), writeSets.data(), 0, nullptr);
+    vkUpdateDescriptorSets(res.m_device, writeSets.size(), writeSets.data(), 0, nullptr);
   }
 
   initRayTracingPipeline(res);
 
   {
     VkComputePipelineCreateInfo compInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    compInfo.stage                       = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    compInfo.stage.stage                 = VK_SHADER_STAGE_COMPUTE_BIT;
-    compInfo.stage.pName                 = "main";
-    compInfo.layout                      = m_dsetContainer.getPipeLayout();
-    compInfo.flags                       = VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
+    VkShaderModuleCreateInfo    shaderInfo{};
+    compInfo.stage       = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    compInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    compInfo.stage.pNext = &shaderInfo;
+    compInfo.stage.pName = "main";
+    compInfo.layout      = m_pipelineLayout;
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeClustersCull);
+    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeClustersCull);
     vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeClustersCull);
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeClusterClassify);
+    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeClusterClassify);
     vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeClusterClassify);
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeTriangleSplit);
+    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeTriangleSplit);
     vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeTriangleSplit);
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeTriangleInstantiate);
+    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeTriangleInstantiate);
     vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeTriangleInstantiate);
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeBlasSetup);
+    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeBlasSetup);
     vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeBlasSetup);
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeBlasClustersInsert);
+    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeBlasClustersInsert);
     vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeBlasClustersInsert);
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeBuildSetup);
+    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeBuildSetup);
     vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeBuildSetup);
 
-    compInfo.stage.module = res.m_shaderManager.get(m_shaders.computeInstancesClassify);
+    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeInstancesClassify);
     vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeInstancesClassify);
   }
 
@@ -416,121 +402,121 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
 }
 
 
-void RendererRayTraceClustersTess::render(VkCommandBuffer primary, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerVK& profiler)
+void RendererRayTraceClustersTess::render(VkCommandBuffer cmd, Resources& res, Scene& scene, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler)
 {
   m_sceneBuildShaderio.viewPos = frame.freezeCulling ? frame.frameConstantsLast.viewPos : frame.frameConstants.viewPos;
   m_sceneBuildShaderio.positionTruncateBitCount = m_config.positionTruncateBits;
 
-  vkCmdUpdateBuffer(primary, res.m_common.view.buffer, 0, sizeof(shaderio::FrameConstants) * 2, (const uint32_t*)&frame.frameConstants);
-  vkCmdUpdateBuffer(primary, m_sceneBuildBuffer.buffer, 0, sizeof(shaderio::SceneBuilding), (const uint32_t*)&m_sceneBuildShaderio);
-  vkCmdFillBuffer(primary, res.m_common.readbackDevice.buffer, 0, sizeof(shaderio::Readback), 0);
-  vkCmdFillBuffer(primary, m_sceneSplitBuffer.buffer, 0, m_sceneSplitBuffer.info.range, ~0);
+  vkCmdUpdateBuffer(cmd, res.m_commonBuffers.frameConstants.buffer, 0, sizeof(shaderio::FrameConstants) * 2,
+                    (const uint32_t*)&frame.frameConstants);
+  vkCmdUpdateBuffer(cmd, m_sceneBuildBuffer.buffer, 0, sizeof(shaderio::SceneBuilding), (const uint32_t*)&m_sceneBuildShaderio);
+  vkCmdFillBuffer(cmd, res.m_commonBuffers.readBack.buffer, 0, sizeof(shaderio::Readback), 0);
+  vkCmdFillBuffer(cmd, m_sceneSplitBuffer.buffer, 0, m_sceneSplitBuffer.bufferSize, ~0);
 
 
   VkMemoryBarrier memBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
 
   memBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
   memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-  vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier,
-                       0, nullptr, 0, nullptr);
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0,
+                       nullptr, 0, nullptr);
 
-  res.cmdImageTransition(primary, res.m_framebuffer.imgColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+  res.cmdImageTransition(cmd, res.m_frameBuffer.imgColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
 
   {
-    vkCmdBindDescriptorSets(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_dsetContainer.getPipeLayout(), 0, 1,
-                            m_dsetContainer.getSets(), 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, m_dsetPack.sets.data(), 0, nullptr);
 
     {
-      auto timerSection = profiler.timeRecurring("Instances Classify", primary);
+      auto timerSection = profiler.cmdFrameSection(cmd, "Instances Classify");
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeInstancesClassify);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeInstancesClassify);
 
-      vkCmdDispatch(primary, (m_sceneBuildShaderio.numRenderInstances + INSTANCES_CLASSIFY_WORKGROUP - 1) / INSTANCES_CLASSIFY_WORKGROUP,
+      vkCmdDispatch(cmd, (m_sceneBuildShaderio.numRenderInstances + INSTANCES_CLASSIFY_WORKGROUP - 1) / INSTANCES_CLASSIFY_WORKGROUP,
                     1, 1);
 
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                            &memBarrier, 0, nullptr, 0, nullptr);
     }
 
     {
-      auto timerSection = profiler.timeRecurring("Cull", primary);
+      auto timerSection = profiler.cmdFrameSection(cmd, "Cull");
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeClustersCull);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeClustersCull);
 
       for(size_t i = 0; i < m_renderInstances.size(); i++)
       {
         const shaderio::RenderInstance& renderInstance = m_renderInstances[i];
         uint32_t                        instanceId     = uint32_t(i);
-        vkCmdPushConstants(primary, m_dsetContainer.getPipeLayout(), m_stageFlags, 0, sizeof(uint32_t), &instanceId);
-        vkCmdDispatch(primary, (renderInstance.numClusters + CLUSTERS_CULL_WORKGROUP - 1) / CLUSTERS_CULL_WORKGROUP, 1, 1);
+        vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &instanceId);
+        vkCmdDispatch(cmd, (renderInstance.numClusters + CLUSTERS_CULL_WORKGROUP - 1) / CLUSTERS_CULL_WORKGROUP, 1, 1);
       }
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                            &memBarrier, 0, nullptr, 0, nullptr);
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
 
       uint32_t buildSetupID = BUILD_SETUP_CLASSIFY;
-      vkCmdPushConstants(primary, m_dsetContainer.getPipeLayout(), m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
-      vkCmdDispatch(primary, 1, 1, 1);
+      vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
+      vkCmdDispatch(cmd, 1, 1, 1);
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1,
                            &memBarrier, 0, nullptr, 0, nullptr);
     }
 
     {
-      auto timerSection = profiler.timeRecurring("Cluster Classify", primary);
+      auto timerSection = profiler.cmdFrameSection(cmd, "Cluster Classify");
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeClusterClassify);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeClusterClassify);
 
-      vkCmdDispatchIndirect(primary, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, dispatchClassify));
+      vkCmdDispatchIndirect(cmd, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, dispatchClassify));
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                            &memBarrier, 0, nullptr, 0, nullptr);
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
 
       uint32_t buildSetupID = BUILD_SETUP_SPLIT;
-      vkCmdPushConstants(primary, m_dsetContainer.getPipeLayout(), m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
-      vkCmdDispatch(primary, 1, 1, 1);
+      vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
+      vkCmdDispatch(cmd, 1, 1, 1);
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                            &memBarrier, 0, nullptr, 0, nullptr);
     }
 
     {
-      auto timerSection = profiler.timeRecurring("Split", primary);
+      auto timerSection = profiler.cmdFrameSection(cmd, "Split");
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeTriangleSplit);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeTriangleSplit);
 
-      vkCmdDispatch(primary, (m_config.persistentThreads + TRIANGLE_SPLIT_WORKGROUP - 1) / TRIANGLE_SPLIT_WORKGROUP, 1, 1);
+      vkCmdDispatch(cmd, (m_config.persistentThreads + TRIANGLE_SPLIT_WORKGROUP - 1) / TRIANGLE_SPLIT_WORKGROUP, 1, 1);
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                            &memBarrier, 0, nullptr, 0, nullptr);
 
-      vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
 
       uint32_t buildSetupID = BUILD_SETUP_INSTANTIATE_TESS;
-      vkCmdPushConstants(primary, m_dsetContainer.getPipeLayout(), m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
-      vkCmdDispatch(primary, 1, 1, 1);
+      vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
+      vkCmdDispatch(cmd, 1, 1, 1);
 
       memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
       memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-      vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1,
                            &memBarrier, 0, nullptr, 0, nullptr);
     }
@@ -538,33 +524,33 @@ void RendererRayTraceClustersTess::render(VkCommandBuffer primary, Resources& re
 
     {
       {
-        auto timerSection = profiler.timeRecurring("PrepInstantiate", primary);
+        auto timerSection = profiler.cmdFrameSection(cmd, "PrepInstantiate");
 
-        vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeTriangleInstantiate);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeTriangleInstantiate);
 
-        vkCmdDispatchIndirect(primary, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, dispatchTriangleInstantiate));
+        vkCmdDispatchIndirect(cmd, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, dispatchTriangleInstantiate));
 
         memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-        vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                              &memBarrier, 0, nullptr, 0, nullptr);
 
-        vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
 
         uint32_t buildSetupID = BUILD_SETUP_BUILD_BLAS;
-        vkCmdPushConstants(primary, m_dsetContainer.getPipeLayout(), m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
-        vkCmdDispatch(primary, 1, 1, 1);
+        vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
+        vkCmdDispatch(cmd, 1, 1, 1);
 
         memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-        vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                              0, 1, &memBarrier, 0, nullptr, 0, nullptr);
       }
 
 
       {
-        auto timerSection = profiler.timeRecurring("Clas Instantiate / Build", primary);
+        auto timerSection = profiler.cmdFrameSection(cmd, "Clas Instantiate / Build");
 
         VkClusterAccelerationStructureCommandsInfoNV cmdInfo = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_COMMANDS_INFO_NV};
         VkClusterAccelerationStructureInputInfoNV inputs = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV};
@@ -594,11 +580,11 @@ void RendererRayTraceClustersTess::render(VkCommandBuffer primary, Resources& re
 
         cmdInfo.scratchData = m_cluster.m_scratchBuffer.address;
         cmdInfo.input       = inputs;
-        vkCmdBuildClusterAccelerationStructureIndirectNV(primary, &cmdInfo);
+        vkCmdBuildClusterAccelerationStructureIndirectNV(cmd, &cmdInfo);
 
         if(m_config.transientClusters1X || m_config.transientClusters2X)
         {
-          //auto timerSection = profiler.timeRecurring("Clas Build", primary);
+          //auto timerSection = profiler.cmdFrameSection(primary,"Clas Build");
 
           VkClusterAccelerationStructureCommandsInfoNV cmdInfo = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_COMMANDS_INFO_NV};
           VkClusterAccelerationStructureInputInfoNV inputs = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV};
@@ -629,45 +615,44 @@ void RendererRayTraceClustersTess::render(VkCommandBuffer primary, Resources& re
           // separate scratch space used to allow overlap with previous build
           cmdInfo.scratchData = m_cluster.m_scratchBuffer.address + m_cluster.m_scratchSize;
           cmdInfo.input       = inputs;
-          vkCmdBuildClusterAccelerationStructureIndirectNV(primary, &cmdInfo);
+          vkCmdBuildClusterAccelerationStructureIndirectNV(cmd, &cmdInfo);
         }
 
-        vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBlasSetup);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBlasSetup);
 
-        vkCmdDispatch(primary, uint32_t(m_renderInstances.size() + BLAS_BUILD_SETUP_WORKGROUP - 1) / BLAS_BUILD_SETUP_WORKGROUP,
-                      1, 1);
+        vkCmdDispatch(cmd, uint32_t(m_renderInstances.size() + BLAS_BUILD_SETUP_WORKGROUP - 1) / BLAS_BUILD_SETUP_WORKGROUP, 1, 1);
 
         memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
         memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-        vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1,
                              &memBarrier, 0, nullptr, 0, nullptr);
       }
 
       {
-        auto timerSection = profiler.timeRecurring("Insert", primary);
+        auto timerSection = profiler.cmdFrameSection(cmd, "Insert");
 
-        vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBlasClustersInsert);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBlasClustersInsert);
 
         uint32_t specialInstanceID = 0;
-        vkCmdPushConstants(primary, m_dsetContainer.getPipeLayout(), m_stageFlags, 0, sizeof(uint32_t), &specialInstanceID);
-        vkCmdDispatchIndirect(primary, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, dispatchBlasTempInsert));
+        vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &specialInstanceID);
+        vkCmdDispatchIndirect(cmd, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, dispatchBlasTempInsert));
 
         if(m_config.transientClusters1X || m_config.transientClusters2X)
         {
           uint32_t specialInstanceID = 1;
-          vkCmdPushConstants(primary, m_dsetContainer.getPipeLayout(), m_stageFlags, 0, sizeof(uint32_t), &specialInstanceID);
-          vkCmdDispatchIndirect(primary, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, dispatchBlasTransInsert));
+          vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &specialInstanceID);
+          vkCmdDispatchIndirect(cmd, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, dispatchBlasTransInsert));
         }
 
         memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-        vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                             0, 1, &memBarrier, 0, nullptr, 0, nullptr);
       }
 
       {
-        auto timerSection = profiler.timeRecurring("Blas Build", primary);
+        auto timerSection = profiler.cmdFrameSection(cmd, "Blas Build");
 
         VkClusterAccelerationStructureCommandsInfoNV cmdInfo = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_COMMANDS_INFO_NV};
         VkClusterAccelerationStructureInputInfoNV inputs = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV};
@@ -682,7 +667,7 @@ void RendererRayTraceClustersTess::render(VkCommandBuffer primary, Resources& re
         // we feed the generated blas addresses directly into the ray instances
         cmdInfo.dstAddressesArray.deviceAddress =
             m_tlasInstancesBuffer.address + offsetof(VkAccelerationStructureInstanceKHR, accelerationStructureReference);
-        cmdInfo.dstAddressesArray.size   = m_tlasInstancesBuffer.info.range;
+        cmdInfo.dstAddressesArray.size   = m_tlasInstancesBuffer.bufferSize;
         cmdInfo.dstAddressesArray.stride = sizeof(VkAccelerationStructureInstanceKHR);
 
         cmdInfo.dstSizesArray.deviceAddress = m_sceneBuildShaderio.blasBuildSizes;
@@ -699,23 +684,23 @@ void RendererRayTraceClustersTess::render(VkCommandBuffer primary, Resources& re
 
         cmdInfo.scratchData = m_cluster.m_scratchBuffer.address;
         cmdInfo.input       = inputs;
-        vkCmdBuildClusterAccelerationStructureIndirectNV(primary, &cmdInfo);
+        vkCmdBuildClusterAccelerationStructureIndirectNV(cmd, &cmdInfo);
 
         memBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
         memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-        vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                              VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
       }
 
       {
-        auto timerSection = profiler.timeRecurring("Tlas Build", primary);
+        auto timerSection = profiler.cmdFrameSection(cmd, "Tlas Build");
 
-        updateRayTracingTlas(primary, res, scene, !m_buildTlas);
+        updateRayTracingTlas(cmd, res, scene, !m_buildTlas);
         m_buildTlas = false;
 
         memBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
         memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-        vkCmdPipelineBarrier(primary, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                              VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
       }
     }
@@ -724,27 +709,23 @@ void RendererRayTraceClustersTess::render(VkCommandBuffer primary, Resources& re
   // Ray trace
   if(true)
   {
-    auto timerSection = profiler.timeRecurring("Render", primary);
+    auto timerSection = profiler.cmdFrameSection(cmd, "Render");
 
-    vkCmdBindPipeline(primary, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtPipe.plines[0]);
-    vkCmdBindDescriptorSets(primary, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtPipe.layout, 0, 1,
-                            m_dsetContainer.getSets(), 0, nullptr);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelines.rayTracing);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 0, 1, m_dsetPack.sets.data(), 0, nullptr);
 
-    const std::array<VkStridedDeviceAddressRegionKHR, 4>& bindingTables = m_rtSbt.getRegions();
-    vkCmdTraceRaysKHR(primary, &bindingTables[0], &bindingTables[1], &bindingTables[2], &bindingTables[3],
+    vkCmdTraceRaysKHR(cmd, &m_sbtRegions.raygen, &m_sbtRegions.miss, &m_sbtRegions.hit, &m_sbtRegions.callable,
                       frame.frameConstants.viewport.x, frame.frameConstants.viewport.y, 1);
 
-
-    res.cmdBeginRendering(primary, false, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
-    res.cmdDynamicState(primary);
-    writeRayTracingDepthBuffer(primary);
-    vkCmdEndRendering(primary);
+    res.cmdBeginRendering(cmd, false, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+    writeRayTracingDepthBuffer(cmd);
+    vkCmdEndRendering(cmd);
   }
 
   {
     if(!frame.freezeCulling)
     {
-      res.cmdBuildHiz(primary, frame, profiler);
+      res.cmdBuildHiz(cmd, frame, profiler);
     }
   }
 
@@ -760,32 +741,23 @@ void RendererRayTraceClustersTess::render(VkCommandBuffer primary, Resources& re
 
 void RendererRayTraceClustersTess::deinit(Resources& res)
 {
+  m_tessTable.deinit(res);
+
   deinitBasics(res);
   m_cluster.deinit(res);
   deinitRayTracingTlas(res);
 
-  res.destroy(m_sceneBuildBuffer);
-  res.destroy(m_sceneDataBuffer);
-  res.destroy(m_sceneSplitBuffer);
-  res.destroy(m_sceneBlasDataBuffer);
-  res.destroy(m_sceneClasDataBuffer);
+  res.m_allocator.destroyBuffer(m_sceneBuildBuffer);
+  res.m_allocator.destroyBuffer(m_sceneDataBuffer);
+  res.m_allocator.destroyBuffer(m_sceneSplitBuffer);
+  res.m_allocator.destroyBuffer(m_sbtBuffer);
+  res.m_allocator.destroyLargeBuffer(m_sceneBlasDataBuffer);
+  res.m_allocator.destroyLargeBuffer(m_sceneClasDataBuffer);
 
-  m_tessTable.deinit(res);
+  res.destroyPipelines(m_pipelines);
+  vkDestroyPipelineLayout(res.m_device, m_pipelineLayout, nullptr);
+  m_dsetPack.deinit();
 
-  m_rtSbt.destroy();               // Shading binding table wrapper
-  m_rtPipe.destroy(res.m_device);  // Hold pipelines and layout
-
-  vkDestroyPipeline(res.m_device, m_pipelines.computeClusterClassify, nullptr);
-  vkDestroyPipeline(res.m_device, m_pipelines.computeClustersCull, nullptr);
-  vkDestroyPipeline(res.m_device, m_pipelines.computeBlasClustersInsert, nullptr);
-  vkDestroyPipeline(res.m_device, m_pipelines.computeTriangleInstantiate, nullptr);
-  vkDestroyPipeline(res.m_device, m_pipelines.computeTriangleSplit, nullptr);
-  vkDestroyPipeline(res.m_device, m_pipelines.computeBlasSetup, nullptr);
-  vkDestroyPipeline(res.m_device, m_pipelines.computeBuildSetup, nullptr);
-
-  res.destroyShaders(m_shaders);
-
-  m_dsetContainer.deinit();
   m_resourceReservedUsage = {};
 }
 
@@ -815,8 +787,7 @@ bool RendererRayTraceClustersTess::initRayTracingScene(Resources& res, Scene& sc
 
 void RendererRayTraceClustersTess::initRayTracingPipeline(Resources& res)
 {
-  nvvkhl::PipelineContainer& p = m_rtPipe;
-  p.plines.resize(1);
+  VkDevice device = res.m_device;
 
   enum StageIndices
   {
@@ -827,28 +798,37 @@ void RendererRayTraceClustersTess::initRayTracingPipeline(Resources& res)
     eShaderGroupCount
   };
   std::array<VkPipelineShaderStageCreateInfo, eShaderGroupCount> stages{};
-  for(auto& s : stages)
-    s.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  std::array<VkShaderModuleCreateInfo, eShaderGroupCount>        stageShaders{};
+  for(uint32_t s = 0; s < eShaderGroupCount; s++)
+  {
+    stageShaders[s].sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  }
+  for(uint32_t s = 0; s < eShaderGroupCount; s++)
+  {
+    stages[s].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[s].pNext = &stageShaders[s];
+    stages[s].pName = "main";
+  }
 
-  stages[eRaygen].module     = res.m_shaderManager.getShaderModule(m_shaders.rayGen).module;
-  stages[eRaygen].pName      = "main";
-  stages[eRaygen].stage      = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-  stages[eMiss].module       = res.m_shaderManager.getShaderModule(m_shaders.miss).module;
-  stages[eMiss].pName        = "main";
-  stages[eMiss].stage        = VK_SHADER_STAGE_MISS_BIT_KHR;
-  stages[eMissAO].module     = res.m_shaderManager.getShaderModule(m_shaders.missAO).module;
-  stages[eMissAO].pName      = "main";
-  stages[eMissAO].stage      = VK_SHADER_STAGE_MISS_BIT_KHR;
-  stages[eClosestHit].module = res.m_shaderManager.getShaderModule(m_shaders.closestHit).module;
-  stages[eClosestHit].pName  = "main";
-  stages[eClosestHit].stage  = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+  stages[eRaygen].stage              = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+  stageShaders[eRaygen].codeSize     = nvvkglsl::GlslCompiler::getSpirvSize(m_shaders.rayGen);
+  stageShaders[eRaygen].pCode        = nvvkglsl::GlslCompiler::getSpirv(m_shaders.rayGen);
+  stages[eMiss].stage                = VK_SHADER_STAGE_MISS_BIT_KHR;
+  stageShaders[eMiss].codeSize       = nvvkglsl::GlslCompiler::getSpirvSize(m_shaders.rayMiss);
+  stageShaders[eMiss].pCode          = nvvkglsl::GlslCompiler::getSpirv(m_shaders.rayMiss);
+  stages[eMissAO].stage              = VK_SHADER_STAGE_MISS_BIT_KHR;
+  stageShaders[eMissAO].codeSize     = nvvkglsl::GlslCompiler::getSpirvSize(m_shaders.rayMissAO);
+  stageShaders[eMissAO].pCode        = nvvkglsl::GlslCompiler::getSpirv(m_shaders.rayMissAO);
+  stages[eClosestHit].stage          = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+  stageShaders[eClosestHit].codeSize = nvvkglsl::GlslCompiler::getSpirvSize(m_shaders.rayClosestHit);
+  stageShaders[eClosestHit].pCode    = nvvkglsl::GlslCompiler::getSpirv(m_shaders.rayClosestHit);
 
   // Shader groups
-  VkRayTracingShaderGroupCreateInfoKHR group{VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR};
-  group.generalShader      = VK_SHADER_UNUSED_KHR;
-  group.closestHitShader   = VK_SHADER_UNUSED_KHR;
-  group.anyHitShader       = VK_SHADER_UNUSED_KHR;
-  group.intersectionShader = VK_SHADER_UNUSED_KHR;
+  VkRayTracingShaderGroupCreateInfoKHR group{.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                                             .generalShader      = VK_SHADER_UNUSED_KHR,
+                                             .closestHitShader   = VK_SHADER_UNUSED_KHR,
+                                             .anyHitShader       = VK_SHADER_UNUSED_KHR,
+                                             .intersectionShader = VK_SHADER_UNUSED_KHR};
 
   std::vector<VkRayTracingShaderGroupCreateInfoKHR> shaderGroups;
   // Raygen
@@ -861,7 +841,7 @@ void RendererRayTraceClustersTess::initRayTracingPipeline(Resources& res)
   group.generalShader = eMiss;
   shaderGroups.push_back(group);
 
-  // Miss AO
+  // Miss Ao
   group.type          = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
   group.generalShader = eMissAO;
   shaderGroups.push_back(group);
@@ -872,45 +852,59 @@ void RendererRayTraceClustersTess::initRayTracingPipeline(Resources& res)
   group.closestHitShader = eClosestHit;
   shaderGroups.push_back(group);
 
-  // Push constant: we want to be able to update constants used by the shaders
-  //const VkPushConstantRange push_constant{VK_SHADER_STAGE_ALL, 0, sizeof(DH::PushConstant)};
-
-  // Descriptor sets: one specific to ray tracing, and one shared with the rasterization pipeline
-  std::vector<VkDescriptorSetLayout> dsetLayouts = {m_dsetContainer.getLayout()};  // , m_pContainer[eGraphic].dstLayout};
-  VkPipelineLayoutCreateInfo layoutCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  layoutCreateInfo.setLayoutCount         = static_cast<uint32_t>(dsetLayouts.size());
-  layoutCreateInfo.pSetLayouts            = dsetLayouts.data();
-  layoutCreateInfo.pushConstantRangeCount = 0;  //1;
-  //pipeline_layout_create_info.pPushConstantRanges    = &push_constant,
-
-  vkCreatePipelineLayout(res.m_device, &layoutCreateInfo, nullptr, &p.layout);
-
   // Assemble the shader stages and recursion depth info into the ray tracing pipeline
-  VkRayTracingPipelineCreateInfoKHR pipelineInfo{VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR};
+  VkRayTracingPipelineCreateInfoKHR rayPipelineInfo{
+      .sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+      .stageCount                   = uint32_t(eShaderGroupCount),
+      .pStages                      = stages.data(),
+      .groupCount                   = static_cast<uint32_t>(shaderGroups.size()),
+      .pGroups                      = shaderGroups.data(),
+      .maxPipelineRayRecursionDepth = 2,
+      .layout                       = m_pipelineLayout,
+  };
+
+  // NEW for clusters! we need to enable their usage explicitly for a ray tracing pipeline
   VkRayTracingPipelineClusterAccelerationStructureCreateInfoNV pipeClusters = {
       VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CLUSTER_ACCELERATION_STRUCTURE_CREATE_INFO_NV};
+  pipeClusters.allowClusterAccelerationStructure = true;
 
-  pipelineInfo.stageCount                   = static_cast<uint32_t>(stages.size());
-  pipelineInfo.pStages                      = stages.data();
-  pipelineInfo.groupCount                   = static_cast<uint32_t>(shaderGroups.size());
-  pipelineInfo.pGroups                      = shaderGroups.data();
-  pipelineInfo.maxPipelineRayRecursionDepth = 2;
-  pipelineInfo.layout                       = p.layout;
-  pipelineInfo.flags                        = VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
+  rayPipelineInfo.pNext = &pipeClusters;
 
-  // new for clusters
-  {
-    pipelineInfo.pNext                             = &pipeClusters;
-    pipeClusters.allowClusterAccelerationStructure = true;
-  }
-
-  VkResult result = vkCreateRayTracingPipelinesKHR(res.m_device, {}, {}, 1, &pipelineInfo, nullptr, &p.plines[0]);
+  NVVK_CHECK(vkCreateRayTracingPipelinesKHR(res.m_device, {}, {}, 1, &rayPipelineInfo, nullptr, &m_pipelines.rayTracing));
+  NVVK_DBG_NAME(m_pipelines.rayTracing);
 
   // Creating the SBT
-  m_rtSbt.setup(res.m_device, res.m_queueFamily, &res.m_allocator, m_rtProperties);
-  m_rtSbt.create(p.plines[0], pipelineInfo);
-}
+  {
+    // Shader Binding Table (SBT) setup
+    nvvk::SBTGenerator sbtGenerator;
+    sbtGenerator.init(res.m_device, m_rtProperties);
 
+    // Prepare SBT data from ray pipeline
+    size_t bufferSize = sbtGenerator.calculateSBTBufferSize(m_pipelines.rayTracing, rayPipelineInfo);
+
+    // Create SBT buffer using the size from above
+    NVVK_CHECK(res.m_allocator.createBuffer(m_sbtBuffer, bufferSize, VK_BUFFER_USAGE_2_SHADER_BINDING_TABLE_BIT_KHR,
+                                            VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, sbtGenerator.getBufferAlignment()));
+    NVVK_DBG_NAME(m_sbtBuffer.buffer);
+
+    nvvk::StagingUploader uploader;
+    uploader.init(&res.m_allocator);
+
+    void* mapping = nullptr;
+    NVVK_CHECK(uploader.appendBufferMapping(m_sbtBuffer, 0, bufferSize, mapping));
+    NVVK_CHECK(sbtGenerator.populateSBTBuffer(m_sbtBuffer.address, bufferSize, mapping));
+
+    VkCommandBuffer cmd = res.createTempCmdBuffer();
+    uploader.cmdUploadAppended(cmd);
+    res.tempSyncSubmit(cmd);
+    uploader.deinit();
+
+    // Retrieve the regions, which are using addresses based on the m_sbtBuffer.address
+    m_sbtRegions = sbtGenerator.getSBTRegions();
+
+    sbtGenerator.deinit();
+  }
+}
 
 std::unique_ptr<Renderer> makeRendererRayTraceClustersTess()
 {
@@ -919,19 +913,17 @@ std::unique_ptr<Renderer> makeRendererRayTraceClustersTess()
 
 void RendererRayTraceClustersTess::updatedFrameBuffer(Resources& res)
 {
-  vkDeviceWaitIdle(res.m_device);
   std::array<VkWriteDescriptorSet, 3> writeSets;
-  VkDescriptorImageInfo               renderTargetInfo;
+
+  VkDescriptorImageInfo renderTargetInfo;
   renderTargetInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-  renderTargetInfo.imageView   = res.m_framebuffer.viewColor;
-  writeSets[0]                 = m_dsetContainer.makeWrite(0, BINDINGS_RENDER_TARGET, &renderTargetInfo);
-
-  VkDescriptorImageInfo raytracingDepthInfo;
-  raytracingDepthInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-  raytracingDepthInfo.imageView   = res.m_framebuffer.viewRaytracingDepth;
-
-  writeSets[1] = m_dsetContainer.makeWrite(0, BINDINGS_RAYTRACING_DEPTH, &raytracingDepthInfo);
-  writeSets[2] = m_dsetContainer.makeWrite(0, BINDINGS_HIZ_TEX, &res.m_hizUpdate.farImageInfo);
+  renderTargetInfo.imageView   = res.m_frameBuffer.imgColor.descriptor.imageView;
+  writeSets[0]                 = m_dsetPack.getWriteSet(BINDINGS_RENDER_TARGET);
+  writeSets[0].pImageInfo      = &renderTargetInfo;
+  writeSets[1]                 = m_dsetPack.getWriteSet(BINDINGS_RAYTRACING_DEPTH);
+  writeSets[1].pImageInfo      = &res.m_frameBuffer.imgRaytracingDepth.descriptor;
+  writeSets[2]                 = m_dsetPack.getWriteSet(BINDINGS_HIZ_TEX);
+  writeSets[2].pImageInfo      = &res.m_hizUpdate.farImageInfo;
 
   vkUpdateDescriptorSets(res.m_device, uint32_t(writeSets.size()), writeSets.data(), 0, nullptr);
 

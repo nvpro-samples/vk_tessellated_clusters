@@ -21,17 +21,24 @@
 
 #include <vector>
 
+#include <nvcluster/nvcluster.h>
+
 #include "resources.hpp"
 
 namespace tessellatedclusters {
 struct SceneConfig
 {
-  uint32_t clusterVertices  = 64;
-  uint32_t clusterTriangles = 64;
-  bool     clusterStripify  = true;
-  bool     clusterNvLibrary = true;
-  // 0 disables
-  float clusterNvGraphWeight = 0;
+  uint32_t         clusterVertices           = 64;
+  uint32_t         clusterTriangles          = 64;
+  nvcluster_Config clusterNvConfig           = {};
+  float            clusterMeshoptSpatialFill = 0.5f;
+
+  bool clusterStripify  = true;
+  bool clusterNvLibrary = false;
+
+  // Influence the number of geometries that can be processed in parallel.
+  // Percentage of threads of maximum hardware concurrency
+  float processingThreadsPct = 0.5;
 };
 
 class Scene
@@ -73,12 +80,13 @@ public:
     std::vector<shaderio::Cluster> clusters;
     std::vector<shaderio::BBox>    clusterBboxes;
 
-    RBuffer positionsBuffer;
-    RBuffer normalsBuffer;
-    RBuffer texCoordsBuffer;
-    RBuffer clustersBuffer;
-    RBuffer clusterLocalTrianglesBuffer;
-    RBuffer clusterBboxesBuffer;
+    nvvk::Buffer positionsBuffer;
+    nvvk::Buffer normalsBuffer;
+    nvvk::Buffer texCoordsBuffer;
+    nvvk::Buffer trianglesBuffer;
+    nvvk::Buffer clustersBuffer;
+    nvvk::Buffer clusterLocalTrianglesBuffer;
+    nvvk::Buffer clusterBboxesBuffer;
   };
 
   struct Camera
@@ -90,38 +98,84 @@ public:
     float     fovy;
   };
 
-  bool init(const char* filename, Resources& res, const SceneConfig& config);
+  bool init(const std::filesystem::path& filename, const SceneConfig& config, Resources& res);
   void deinit(Resources& res);
 
   SceneConfig m_config;
 
   shaderio::BBox m_bbox;
 
-  std::vector<Instance>      m_instances;
-  std::vector<Geometry>      m_geometries;
-  std::vector<Camera>        m_cameras;
-  std::vector<std::string>   m_uriTextures;
-  std::vector<nvvk::Texture> m_textureImages;
+  std::vector<Instance>    m_instances;
+  std::vector<Geometry>    m_geometries;
+  std::vector<Camera>      m_cameras;
+  std::vector<std::string> m_uriTextures;
+  std::vector<nvvk::Image> m_textureImages;
 
+  uint32_t m_maxClusterTriangles           = 0;
+  uint32_t m_maxClusterVertices            = 0;
+  uint32_t m_maxPerGeometryClusters        = 0;
+  uint32_t m_maxPerGeometryTriangles       = 0;
+  uint32_t m_maxPerGeometryVertices        = 0;
+  uint32_t m_maxPerGeometryClusterVertices = 0;
+  uint32_t m_numClusters                   = 0;
+  uint32_t m_numTriangles                  = 0;
 
-  uint32_t              m_maxPerGeometryClusters        = 0;
-  uint32_t              m_maxPerGeometryTriangles       = 0;
-  uint32_t              m_maxPerGeometryVertices        = 0;
-  uint32_t              m_maxPerGeometryClusterVertices = 0;
-  uint32_t              m_numClusters                   = 0;
-  uint32_t              m_numTriangles                  = 0;
   std::vector<uint32_t> m_clusterTriangleHistogram;
   std::vector<uint32_t> m_clusterVertexHistogram;
-
-  uint32_t m_clusterTriangleHistogramMax;
-  uint32_t m_clusterVertexHistogramMax;
+  uint32_t              m_clusterTriangleHistogramMax;
+  uint32_t              m_clusterVertexHistogramMax;
 
   size_t m_sceneMemBytes = 0;
 
 private:
-  bool loadGLTF(const char* filename);
-  bool buildClusters();
-  void buildGeometryClusterVertices(Geometry& geom);
+  struct ProcessingInfo
+  {
+    // how we perform multi-threading:
+    // - either over geometries (outer loop)
+    // - or within a geometry (inner loops)
+
+    nvcluster_Context clusterContext{};
+
+    uint32_t numPoolThreadsOriginal = 1;
+    uint32_t numPoolThreads         = 1;
+
+    uint32_t numOuterThreads = 1;
+    uint32_t numInnerThreads = 1;
+
+    size_t geometryCount = 0;
+
+    std::mutex processOnlySaveMutex;
+
+    // some stats
+
+    std::atomic_uint64_t numTotalTriangles = 0;
+    std::atomic_uint64_t numTotalStrips    = 0;
+
+    // logging progress
+
+    uint32_t   progressLastPercentage      = 0;
+    uint32_t   progressGeometriesCompleted = 0;
+    std::mutex progressMutex;
+
+    nvutils::PerformanceTimer clock;
+    double                    startTime = 0;
+
+    void init(float pct);
+    void setupParallelism(size_t geometryCount_);
+    void deinit();
+
+    void logBegin();
+    void logCompletedGeometry();
+    void logEnd();
+  };
+
+  bool loadGLTF(ProcessingInfo& processingInfo, const std::filesystem::path& filename);
+
+  void processGeometry(ProcessingInfo& processingInfo, Geometry& geometry);
+  void buildGeometryClusters(ProcessingInfo& processingInfo, Geometry& geometry);
+  void buildGeometryClusterBboxes(ProcessingInfo& processingInfo, Geometry& geometry);
+  void buildGeometryClusterStrips(ProcessingInfo& processingInfo, Geometry& geometry);
+  void buildGeometryClusterVertices(ProcessingInfo& processingInfo, Geometry& geometry);
 
   void computeInstanceBBoxes();
   void uploadImages(Resources& res);
