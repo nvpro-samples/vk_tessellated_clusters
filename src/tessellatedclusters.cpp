@@ -450,7 +450,8 @@ void TessellatedClusters::handleChanges()
   bool shaderChanged = false;
   if(m_reloadShaders)
   {
-    shaderChanged = true;
+    shaderChanged   = true;
+    m_reloadShaders = false;
   }
 
   bool frameBufferChanged = false;
@@ -578,7 +579,12 @@ void TessellatedClusters::onRender(VkCommandBuffer cmd)
     frameConstants.viewMatrixI     = viewI;
     frameConstants.projMatrix      = projection;
     frameConstants.projMatrixI     = glm::inverse(projection);
-    frameConstants.tessRate        = m_tweak.tessRatePixels ? 1.0f / float(m_tweak.tessRatePixels) : 0.0f;
+
+    glm::mat4 viewNoTrans         = view;
+    viewNoTrans[3]                = {0.0f, 0.0f, 0.0f, 1.0f};
+    frameConstants.skyProjMatrixI = glm::inverse(projection * viewNoTrans);
+
+    frameConstants.tessRate = m_tweak.tessRatePixels ? 1.0f / float(m_tweak.tessRatePixels) : 0.0f;
 
     glm::vec4 hPos   = projection * glm::vec4(1.0f, 1.0f, -frameConstants.farPlane, 1.0f);
     glm::vec2 hCoord = glm::vec2(hPos.x / hPos.w, hPos.y / hPos.w);

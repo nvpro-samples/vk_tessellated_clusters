@@ -1,4 +1,6 @@
 # Changelog for vk_tessellated_clusters
+* 2025-7-7:
+  * Fix regression with sky rendering & missing sky UI
 * 2025-6-27
   * Updated `nv_cluster_lod_library` submodule, which has new API & proper vertex limit support.
 * 2025-6-23

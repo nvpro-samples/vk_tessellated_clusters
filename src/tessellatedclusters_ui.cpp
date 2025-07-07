@@ -665,11 +665,7 @@ void TessellatedClusters::onUIRender()
                     "Mix between flashlight and sun light");
     PE::end();
     ImGui::TextDisabled("Sun & Sky");
-    {
-      PE::begin();
-      nvgui::skySimpleParametersUI(m_frameConfig.frameConstants.skyParams);
-      PE::end();
-    }
+    nvgui::skySimpleParametersUI(m_frameConfig.frameConstants.skyParams);
   }
 
   ImGui::End();
