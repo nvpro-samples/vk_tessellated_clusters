@@ -323,7 +323,7 @@ void TessellatedClusters::onAttach(nvapp::Application* app)
     const std::filesystem::path              exeDirectoryPath   = nvutils::getExecutablePath().parent_path();
     const std::vector<std::filesystem::path> defaultSearchPaths = {
         // regular build
-        std::filesystem::absolute(exeDirectoryPath / PROJECT_EXE_TO_DOWNLOAD_DIRECTORY),
+        std::filesystem::absolute(exeDirectoryPath / TARGET_EXE_TO_DOWNLOAD_DIRECTORY),
         // install build
         std::filesystem::absolute(exeDirectoryPath / "resources"),
     };
