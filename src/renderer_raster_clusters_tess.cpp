@@ -191,33 +191,33 @@ bool RendererRasterClustersTess::init(Resources& res, Scene& scene, const Render
       m_stageFlags |= VK_SHADER_STAGE_TASK_BIT_NV;
     }
 
-    m_dsetPack.bindings.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_TESSTABLE_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_SCENEBUILDING_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_SCENEBUILDING_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_HIZ_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, m_stageFlags);
+    nvvk::DescriptorBindings bindings;
+    bindings.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_TESSTABLE_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_SCENEBUILDING_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_SCENEBUILDING_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_HIZ_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, m_stageFlags);
 
     const uint32_t numDisplacedTextures = uint32_t(scene.m_textureImages.size());
     if(numDisplacedTextures > 0)
     {
-      m_dsetPack.bindings.addBinding(BINDINGS_DISPLACED_TEXTURES, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                     numDisplacedTextures, m_stageFlags);
+      bindings.addBinding(BINDINGS_DISPLACED_TEXTURES, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, numDisplacedTextures, m_stageFlags);
     }
 
-    m_dsetPack.initFromBindings(res.m_device);
+    m_dsetPack.init(bindings, res.m_device);
 
-    nvvk::createPipelineLayout(res.m_device, &m_pipelineLayout, {m_dsetPack.layout}, {{m_stageFlags, 0, sizeof(uint32_t)}});
+    nvvk::createPipelineLayout(res.m_device, &m_pipelineLayout, {m_dsetPack.getLayout()}, {{m_stageFlags, 0, sizeof(uint32_t)}});
 
     nvvk::WriteSetContainer writeSets;
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_FRAME_UBO), res.m_commonBuffers.frameConstants);
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_TESSTABLE_UBO), m_tessTable.m_ubo);
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_READBACK_SSBO), res.m_commonBuffers.readBack);
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_RENDERINSTANCES_SSBO), m_renderInstanceBuffer);
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_SCENEBUILDING_SSBO), m_sceneBuildBuffer);
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_SCENEBUILDING_UBO), m_sceneBuildBuffer);
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_HIZ_TEX), res.m_hizUpdate.farImageInfo);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_FRAME_UBO), res.m_commonBuffers.frameConstants);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_TESSTABLE_UBO), m_tessTable.m_ubo);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_READBACK_SSBO), res.m_commonBuffers.readBack);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_RENDERINSTANCES_SSBO), m_renderInstanceBuffer);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_SCENEBUILDING_SSBO), m_sceneBuildBuffer);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_SCENEBUILDING_UBO), m_sceneBuildBuffer);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_HIZ_TEX), res.m_hizUpdate.farImageInfo);
 
     if(numDisplacedTextures > 0)
     {
@@ -229,7 +229,7 @@ bool RendererRasterClustersTess::init(Resources& res, Scene& scene, const Render
         descriptor.sampler               = res.m_samplerLinear;
         imageInfo.emplace_back(descriptor);
       }
-      writeSets.append(m_dsetPack.getWriteSet(BINDINGS_DISPLACED_TEXTURES), imageInfo.data());
+      writeSets.append(m_dsetPack.makeWrite(BINDINGS_DISPLACED_TEXTURES), imageInfo.data());
     }
 
     vkUpdateDescriptorSets(res.m_device, writeSets.size(), writeSets.data(), 0, nullptr);
@@ -321,7 +321,7 @@ void RendererRasterClustersTess::render(VkCommandBuffer cmd, Resources& res, Sce
 
   {
 
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, m_dsetPack.sets.data(), 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, m_dsetPack.getSetPtr(), 0, nullptr);
 
     {
       auto timerSection = profiler.cmdFrameSection(cmd, "Instances Classify");
@@ -431,7 +431,7 @@ void RendererRasterClustersTess::render(VkCommandBuffer cmd, Resources& res, Sce
         writeBackgroundSky(cmd);
       }
 
-      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, m_dsetPack.sets.data(), 0, nullptr);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, m_dsetPack.getSetPtr(), 0, nullptr);
 
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelines.graphicsMeshTess);
 
@@ -457,8 +457,7 @@ void RendererRasterClustersTess::render(VkCommandBuffer cmd, Resources& res, Sce
 void RendererRasterClustersTess::updatedFrameBuffer(Resources& res)
 {
   nvvk::WriteSetContainer writeSets;
-  VkDescriptorSet         dset = m_dsetPack.sets[0];
-  writeSets.append(m_dsetPack.bindings.getWriteSet(BINDINGS_HIZ_TEX, dset), res.m_hizUpdate.farImageInfo);
+  writeSets.append(m_dsetPack.makeWrite(BINDINGS_HIZ_TEX), res.m_hizUpdate.farImageInfo);
   vkUpdateDescriptorSets(res.m_device, writeSets.size(), writeSets.data(), 0, nullptr);
 
   Renderer::updatedFrameBuffer(res);

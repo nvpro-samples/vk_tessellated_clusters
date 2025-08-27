@@ -308,43 +308,43 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
     m_stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR
                    | VK_SHADER_STAGE_COMPUTE_BIT;
 
-    m_dsetPack.bindings.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_TESSTABLE_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_SCENEBUILDING_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_SCENEBUILDING_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_HIZ_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_TLAS, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_RENDER_TARGET, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, m_stageFlags);
-    m_dsetPack.bindings.addBinding(BINDINGS_RAYTRACING_DEPTH, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, m_stageFlags);
+    nvvk::DescriptorBindings bindings;
+    bindings.addBinding(BINDINGS_FRAME_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_TESSTABLE_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_READBACK_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_RENDERINSTANCES_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_SCENEBUILDING_SSBO, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_SCENEBUILDING_UBO, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_HIZ_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_TLAS, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_RENDER_TARGET, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, m_stageFlags);
+    bindings.addBinding(BINDINGS_RAYTRACING_DEPTH, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, m_stageFlags);
 
     const uint32_t numDisplacedTextures = uint32_t(scene.m_textureImages.size());
     if(numDisplacedTextures > 0)
     {
-      m_dsetPack.bindings.addBinding(BINDINGS_DISPLACED_TEXTURES, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                     numDisplacedTextures, m_stageFlags);
+      bindings.addBinding(BINDINGS_DISPLACED_TEXTURES, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, numDisplacedTextures, m_stageFlags);
     }
 
-    m_dsetPack.initFromBindings(res.m_device);
-    nvvk::createPipelineLayout(res.m_device, &m_pipelineLayout, {m_dsetPack.layout}, {{m_stageFlags, 0, sizeof(uint32_t)}});
+    m_dsetPack.init(bindings, res.m_device);
+    nvvk::createPipelineLayout(res.m_device, &m_pipelineLayout, {m_dsetPack.getLayout()}, {{m_stageFlags, 0, sizeof(uint32_t)}});
 
     nvvk::WriteSetContainer writeSets;
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_FRAME_UBO), res.m_commonBuffers.frameConstants);
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_TESSTABLE_UBO), m_tessTable.m_ubo);
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_READBACK_SSBO), res.m_commonBuffers.readBack);
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_RENDERINSTANCES_SSBO), m_renderInstanceBuffer);
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_SCENEBUILDING_SSBO), m_sceneBuildBuffer);
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_SCENEBUILDING_UBO), m_sceneBuildBuffer);
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_HIZ_TEX), res.m_hizUpdate.farImageInfo);
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_TLAS), m_tlas);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_FRAME_UBO), res.m_commonBuffers.frameConstants);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_TESSTABLE_UBO), m_tessTable.m_ubo);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_READBACK_SSBO), res.m_commonBuffers.readBack);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_RENDERINSTANCES_SSBO), m_renderInstanceBuffer);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_SCENEBUILDING_SSBO), m_sceneBuildBuffer);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_SCENEBUILDING_UBO), m_sceneBuildBuffer);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_HIZ_TEX), res.m_hizUpdate.farImageInfo);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_TLAS), m_tlas);
 
     VkDescriptorImageInfo renderTargetInfo;
     renderTargetInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     renderTargetInfo.imageView   = res.m_frameBuffer.imgColor.descriptor.imageView;
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_RENDER_TARGET), &renderTargetInfo);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_RENDER_TARGET), &renderTargetInfo);
 
-    writeSets.append(m_dsetPack.getWriteSet(BINDINGS_RAYTRACING_DEPTH), res.m_frameBuffer.imgRaytracingDepth.descriptor);
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_RAYTRACING_DEPTH), res.m_frameBuffer.imgRaytracingDepth.descriptor);
 
     if(numDisplacedTextures > 0)
     {
@@ -356,7 +356,7 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
         descriptor.sampler               = res.m_samplerLinear;
         imageInfo.emplace_back(descriptor);
       }
-      writeSets.append(m_dsetPack.getWriteSet(BINDINGS_DISPLACED_TEXTURES), imageInfo.data());
+      writeSets.append(m_dsetPack.makeWrite(BINDINGS_DISPLACED_TEXTURES), imageInfo.data());
     }
 
     vkUpdateDescriptorSets(res.m_device, writeSets.size(), writeSets.data(), 0, nullptr);
@@ -424,7 +424,7 @@ void RendererRayTraceClustersTess::render(VkCommandBuffer cmd, Resources& res, S
   res.cmdImageTransition(cmd, res.m_frameBuffer.imgColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
 
   {
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, m_dsetPack.sets.data(), 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayout, 0, 1, m_dsetPack.getSetPtr(), 0, nullptr);
 
     {
       auto timerSection = profiler.cmdFrameSection(cmd, "Instances Classify");
@@ -712,7 +712,7 @@ void RendererRayTraceClustersTess::render(VkCommandBuffer cmd, Resources& res, S
     auto timerSection = profiler.cmdFrameSection(cmd, "Render");
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelines.rayTracing);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 0, 1, m_dsetPack.sets.data(), 0, nullptr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipelineLayout, 0, 1, m_dsetPack.getSetPtr(), 0, nullptr);
 
     vkCmdTraceRaysKHR(cmd, &m_sbtRegions.raygen, &m_sbtRegions.miss, &m_sbtRegions.hit, &m_sbtRegions.callable,
                       frame.frameConstants.viewport.x, frame.frameConstants.viewport.y, 1);
@@ -918,11 +918,11 @@ void RendererRayTraceClustersTess::updatedFrameBuffer(Resources& res)
   VkDescriptorImageInfo renderTargetInfo;
   renderTargetInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
   renderTargetInfo.imageView   = res.m_frameBuffer.imgColor.descriptor.imageView;
-  writeSets[0]                 = m_dsetPack.getWriteSet(BINDINGS_RENDER_TARGET);
+  writeSets[0]                 = m_dsetPack.makeWrite(BINDINGS_RENDER_TARGET);
   writeSets[0].pImageInfo      = &renderTargetInfo;
-  writeSets[1]                 = m_dsetPack.getWriteSet(BINDINGS_RAYTRACING_DEPTH);
+  writeSets[1]                 = m_dsetPack.makeWrite(BINDINGS_RAYTRACING_DEPTH);
   writeSets[1].pImageInfo      = &res.m_frameBuffer.imgRaytracingDepth.descriptor;
-  writeSets[2]                 = m_dsetPack.getWriteSet(BINDINGS_HIZ_TEX);
+  writeSets[2]                 = m_dsetPack.makeWrite(BINDINGS_HIZ_TEX);
   writeSets[2].pImageInfo      = &res.m_hizUpdate.farImageInfo;
 
   vkUpdateDescriptorSets(res.m_device, uint32_t(writeSets.size()), writeSets.data(), 0, nullptr);
