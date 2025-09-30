@@ -670,7 +670,7 @@ void TessellatedClusters::onUIRender()
 
   ImGui::End();
 
-#ifdef _DEBUG
+#ifndef NDEBUG
   ImGui::Begin("Debug");
   if(ImGui::CollapsingHeader("Misc settings", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
   {

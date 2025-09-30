@@ -17,7 +17,7 @@
 * SPDX-License-Identifier: Apache-2.0
 */
 
-#ifdef _DEBUG
+#ifndef NDEBUG
 #define VMA_LEAK_LOG_FORMAT(format, ...)                                                                               \
   do                                                                                                                   \
   {                                                                                                                    \
@@ -128,7 +128,7 @@ int main(int argc, char** argv)
 
   // Setting up the layout of the application
   appInfo.dockSetup = [](ImGuiID viewportID) {
-#ifdef _DEBUG
+#ifndef NDEBUG
     // left side panel container
     ImGuiID debugID = ImGui::DockBuilderSplitNode(viewportID, ImGuiDir_Left, 0.15F, nullptr, &viewportID);
     ImGui::DockBuilderDockWindow("Debug", debugID);
