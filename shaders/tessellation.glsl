@@ -53,7 +53,7 @@ uint tess_encodeBarycentrics(vec3 wuv)
   else if (intWuv.y > intWuv.z)
     intWuv.y = TESSTABLE_COORD_MAX - intWuv.x - intWuv.z;
   else
-    intWuv.x = TESSTABLE_COORD_MAX - intWuv.x - intWuv.y;
+    intWuv.z = TESSTABLE_COORD_MAX - intWuv.x - intWuv.y;
     
   return (intWuv.y | (intWuv.z << 16));
 }

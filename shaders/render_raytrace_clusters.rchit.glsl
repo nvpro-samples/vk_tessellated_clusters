@@ -60,8 +60,6 @@
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_ray_tracing_position_fetch : require
 
-#extension GL_EXT_spirv_intrinsics : require
-
 // at the time of writing, no GLSL extension was available, we leverage 
 // GL_EXT_spirv_intrinsics to hook up the new builtin.
 #extension GL_EXT_spirv_intrinsics : require
