@@ -570,7 +570,7 @@ that splits triangles recursively, was inspired from how `Unreal Engine 5.4` imp
 
 ## Third Party
 
-[meshoptimizer](https://github.com/zeux/meshoptimizer) can be used for as alternative for clusterization, and is always used when the triangles within a cluster are re-ordered to improve triangle strips.
+[meshoptimizer](https://github.com/zeux/meshoptimizer) is used to build and optimize the clusters.
 
 This sample uses [data](/thirdparty/epicgames_tessellation/tessellation_table_epicgames_raw.hpp) derived from `Unreal Engine` which uses its own licensing terms.
 

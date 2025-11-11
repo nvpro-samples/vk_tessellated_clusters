@@ -528,10 +528,6 @@ void TessellatedClusters::onUIRender()
     PE::begin("##Clusters");
     PE::entry("Cluster/meshlet size",
               [&]() { return m_ui.enumCombobox(GUI_MESHLET, "##HiddenID", &m_tweak.clusterConfig); });
-    PE::Checkbox("Use NV cluster library", &m_sceneConfig.clusterNvLibrary,
-                 "uses the nv_cluster_builder library, otherwise meshoptimizer");
-    PE::Checkbox("Optimize for triangle strips", &m_sceneConfig.clusterStripify,
-                 "Re-order triangles within cluster optimizing for triangle strips");
     PE::InputIntClamped("CLAS Mantissa drop bits", (int*)&m_rendererConfig.positionTruncateBits, 0, 22, 1, 1,
                         ImGuiInputTextFlags_EnterReturnsTrue);
     PE::entry(

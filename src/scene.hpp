@@ -20,21 +20,16 @@
 #pragma once
 
 #include <vector>
-
-#include <nvcluster/nvcluster.h>
+#include <volk.h>
 
 #include "resources.hpp"
 
 namespace tessellatedclusters {
 struct SceneConfig
 {
-  uint32_t         clusterVertices           = 64;
-  uint32_t         clusterTriangles          = 64;
-  nvcluster_Config clusterNvConfig           = {};
-  float            clusterMeshoptSpatialFill = 0.5f;
-
-  bool clusterStripify  = true;
-  bool clusterNvLibrary = false;
+  uint32_t clusterVertices           = 64;
+  uint32_t clusterTriangles          = 64;
+  float    clusterMeshoptSpatialFill = 0.5f;
 
   // Influence the number of geometries that can be processed in parallel.
   // Percentage of threads of maximum hardware concurrency
@@ -134,8 +129,6 @@ private:
     // - either over geometries (outer loop)
     // - or within a geometry (inner loops)
 
-    nvcluster_Context clusterContext{};
-
     uint32_t numPoolThreadsOriginal = 1;
     uint32_t numPoolThreads         = 1;
 
@@ -145,11 +138,6 @@ private:
     size_t geometryCount = 0;
 
     std::mutex processOnlySaveMutex;
-
-    // some stats
-
-    std::atomic_uint64_t numTotalTriangles = 0;
-    std::atomic_uint64_t numTotalStrips    = 0;
 
     // logging progress
 
@@ -174,7 +162,7 @@ private:
   void processGeometry(ProcessingInfo& processingInfo, Geometry& geometry);
   void buildGeometryClusters(ProcessingInfo& processingInfo, Geometry& geometry);
   void buildGeometryClusterBboxes(ProcessingInfo& processingInfo, Geometry& geometry);
-  void buildGeometryClusterStrips(ProcessingInfo& processingInfo, Geometry& geometry);
+  void optimizeGeometryClusters(ProcessingInfo& processingInfo, Geometry& geometry);
   void buildGeometryClusterVertices(ProcessingInfo& processingInfo, Geometry& geometry);
 
   void computeInstanceBBoxes();

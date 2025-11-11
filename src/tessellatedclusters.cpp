@@ -46,7 +46,6 @@ TessellatedClusters::TessellatedClusters(const Info& info)
   m_info.parameterRegistry->add({"gridcopies"}, &m_tweak.gridCopies);
   m_info.parameterRegistry->add({"gridconfig"}, &m_tweak.gridConfig);
   m_info.parameterRegistry->add({"clusterconfig"}, (int*)&m_tweak.clusterConfig);
-  m_info.parameterRegistry->add({"nvcluster"}, &m_sceneConfig.clusterNvLibrary);
   //m_info.parameterRegistry->add({"nvclusterunderfill"}, &m_sceneConfig.clusterNvConfig.costUnderfill);
   //m_info.parameterRegistry->add({"nvclusteroverlap"}, &m_sceneConfig.clusterNvConfig.costOverlap);
   //m_info.parameterRegistry->add({"nvclusterunderfillvertices"}, &m_sceneConfig.clusterNvConfig.costUnderfillVertices);
