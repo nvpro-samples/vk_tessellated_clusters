@@ -189,9 +189,12 @@ vec3 tess_getConfigVertexBarycentrics(uint cfg, uint vert)
 
 vec3 tess_interpolate(vec3 base[3], vec3 wuv)
 {
-  return base[0] * wuv.x + base[1] * wuv.y + base[2] * wuv.z;
+  precise vec3 result = base[0] * wuv.x + base[1] * wuv.y + base[2] * wuv.z;
+  return result;
 }
+
 vec2 tess_interpolate(vec2 base[3], vec3 wuv)
 {
-  return base[0] * wuv.x + base[1] * wuv.y + base[2] * wuv.z;
+  precise vec2 result = base[0] * wuv.x + base[1] * wuv.y + base[2] * wuv.z;
+  return result;
 }

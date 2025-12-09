@@ -24,12 +24,6 @@ set(CMAKE_CXX_STANDARD 20)
 # Download the default scene
 download_files(FILENAMES bunny_v2.zip EXTRACT)
 
-#####################################################################################
-# extra libraries
-
-if(NOT TARGET meshoptimizer)
-  add_subdirectory(external/meshoptimizer)
-endif()
 
 #####################################################################################
 # Source files for this project
