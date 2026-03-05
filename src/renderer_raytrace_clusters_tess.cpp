@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
 * SPDX-License-Identifier: Apache-2.0
 */
 
@@ -196,8 +196,8 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
 
   {
     res.m_allocator.createBuffer(m_sceneBuildBuffer, sizeof(shaderio::SceneBuilding),
-                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
-                                     | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+                                     | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
 
     memset(&m_sceneBuildShaderio, 0, sizeof(m_sceneBuildShaderio));
     m_sceneBuildShaderio.numRenderInstances   = uint32_t(m_renderInstances.size());
@@ -228,7 +228,8 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
     rangesBlas.endOverlap();
 
     res.m_allocator.createLargeBuffer(m_sceneBlasDataBuffer, rangesBlas.tempOffset,
-                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+                                          | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                                       res.m_queue.queue);
     m_resourceReservedUsage.rtBlasMemBytes += m_sceneBlasDataBuffer.bufferSize;
 
@@ -269,7 +270,8 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
     }
 
     res.m_allocator.createBuffer(m_sceneDataBuffer, rangesScene.tempOffset,
-                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
+                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+                                     | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
     m_resourceReservedUsage.operationsMemBytes += m_sceneDataBuffer.bufferSize;
 
     m_sceneBuildShaderio.instanceStates += m_sceneDataBuffer.address;
