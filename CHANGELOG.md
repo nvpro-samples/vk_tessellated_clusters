@@ -1,4 +1,7 @@
 # Changelog for vk_tessellated_clusters
+* 2026-03-29:
+  * Avoid evaluating tessellation factors twice in `triangle_split.comp.glsl`
+  * Always round via `uint(round(floatTessellationFactors))` for stable results.
 * 2025-12-9:
   * Removed meshoptimizer as submodule, it is now part of nvpro_core2
   * Bugfix interpolating the barycentric positions within the tessellated triangles by adding the `precise` math keyword. Otherwise cracks may occur.

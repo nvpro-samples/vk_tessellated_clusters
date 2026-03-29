@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
 * SPDX-License-Identifier: Apache-2.0
 */
 
@@ -94,12 +94,13 @@ vec3 tess_getTessFactors(vec3 wPosA, vec3 wPosB, vec3 wPosC)
   edgeLengths.y = distance(wPosB, wPosC);
   edgeLengths.z = distance(wPosC, wPosA);
   
-  return clamp(edgeLengths * segmentsPerLength * view.viewportf.y * view.tessRate, vec3(1.0), vec3(1024 * 32));
+  vec3 factors = round(edgeLengths * segmentsPerLength * view.viewportf.y * view.tessRate);
+  return clamp(factors, vec3(1.0), vec3(1024 * 32));
 }
 
-vec3 tess_getSplitFactor(vec3 tessFactor)
+uvec3 tess_getSplitFactor(uvec3 tessFactor)
 {
-  return clamp(tessFactor / float(TESSTABLE_SIZE), vec3(1), vec3(8));
+  return min((tessFactor + TESSTABLE_SIZE - 1) / TESSTABLE_SIZE, uvec3(8));
 }
 
 uint tess_getConfigIndex(uint cfg)

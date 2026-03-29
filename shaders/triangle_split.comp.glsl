@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
 * SPDX-License-Identifier: Apache-2.0
 */
 
@@ -179,21 +179,8 @@ uvec4 getFactors(vec3 basePositions[3], vec3 baseBarycentrics[3])
 // These children are then processed within `processSubTask` a few lines down
 uint setupTask(inout TessTriangleInfo tessInfo, uint splitIndex, uint pass)
 {
-  // get vertices
-  vec3 basePositions[3];
-  vec3 baseBarycentrics[3];
-  fillBaseVertices(tessInfo, basePositions, baseBarycentrics);
-  
-  uvec4 factors          = getFactors(basePositions, baseBarycentrics);
-  
-  uvec3 splitFactors = clamp((factors.xyz + TESSTABLE_SIZE - 1) / TESSTABLE_SIZE, uvec3(1), uvec3(8));
-  uint cfg = tess_getConfig(splitFactors, tessInfo.subTriangle.vtxEncoded);
-  
-  tessInfo.subTriangle.triangleID_config &= 0x0000FFFF;
-  tessInfo.subTriangle.triangleID_config |= cfg << 16;
-  
   // number of sub-triangles of the subdivision pattern
-  uint outCount = tess_getConfigTriangleCount(cfg);
+  uint outCount = tess_getConfigTriangleCount(tessInfo.subTriangle.triangleID_config >> 16);
   
   return outCount;
 }
@@ -278,9 +265,22 @@ void processSubTask(const TessTriangleInfo subgroupTasks, uint taskID, uint task
 
   offsetPart = subgroupBroadcastFirst(offsetPart);
   offsetPart += subgroupBallotExclusiveBitCount(votePart);
+
+  if (requiresSplitTess)
+  {
+    // adjust for split factor
+    factors.xyz = tess_getSplitFactor(factors.xyz);
+  }
+
+  if (requiresSplitTess || requiresPartTess)
+  {
+    uint cfg = tess_getConfig(factors.xyz, tessInfo.subTriangle.vtxEncoded);
+    tessInfo.subTriangle.triangleID_config &= 0x0000FFFF;
+    tessInfo.subTriangle.triangleID_config |= cfg << 16;
+  }
   
   if (requiresSplitTess && offsetSplit < MAX_SPLIT_TRIANGLES)
-  {     
+  {
     // need to split again
   #if USE_ATOMIC_LOAD_STORE
     atomicStore(build.splitTriangles.d[offsetSplit].cluster.clusterID, tessInfo.cluster.clusterID, gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsRelease);
@@ -297,9 +297,6 @@ void processSubTask(const TessTriangleInfo subgroupTasks, uint taskID, uint task
   else if (requiresPartTess && offsetPart < MAX_PART_TRIANGLES)
   {
     // ready to be rendered
-    uint cfg = tess_getConfig(factors.xyz, tessInfo.subTriangle.vtxEncoded);
-    tessInfo.subTriangle.triangleID_config &= 0x0000FFFF;
-    tessInfo.subTriangle.triangleID_config |= cfg << 16;
     build.partTriangles.d[offsetPart]  = tessInfo;
   #if TESS_USE_TRANSIENTBUILDS
     uint subMax = subgroupMax(offsetPart + 1);
