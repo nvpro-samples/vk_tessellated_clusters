@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
 * SPDX-License-Identifier: Apache-2.0
 */
 
@@ -61,26 +61,27 @@
 
 // The `indirect_setup.comp.glsl` kernel can be run in different
 // modes. The mode is passed as push_constant. The overhead
-// of calling this single invocation shader is high enough that 
+// of calling this single invocation shader is high enough that
 // optimizing it further isn't worth it and a dynamic branch is fine.
 
 #define BUILD_SETUP_CLASSIFY 0
 #define BUILD_SETUP_INSTANTIATE_TESS 1
 #define BUILD_SETUP_DRAW_TESS 2
 #define BUILD_SETUP_SPLIT 3
-#define BUILD_SETUP_BUILD_BLAS 4
+#define BUILD_SETUP_SPLIT_LEVEL 4
+#define BUILD_SETUP_BUILD_BLAS 5
 
 /////////////////////////////////////////
 
 // dimensions of the various compute shader workgroups
 
-#define INSTANCES_CLASSIFY_WORKGROUP            64
-#define CLUSTERS_CULL_WORKGROUP                 64
-#define CLUSTER_CLASSIFY_WORKGROUP              64
-#define CLUSTER_BLAS_INSERT_WORKGROUP           64
-#define CLUSTER_TEMPLATE_INSTANTIATE_WORKGROUP  64
-#define TRIANGLE_SPLIT_WORKGROUP                64
-#define BLAS_BUILD_SETUP_WORKGROUP              64
+#define INSTANCES_CLASSIFY_WORKGROUP 64
+#define CLUSTERS_CULL_WORKGROUP 64
+#define CLUSTER_CLASSIFY_WORKGROUP 64
+#define CLUSTER_BLAS_INSERT_WORKGROUP 64
+#define CLUSTER_TEMPLATE_INSTANTIATE_WORKGROUP 64
+#define TRIANGLE_SPLIT_WORKGROUP 64
+#define BLAS_BUILD_SETUP_WORKGROUP 64
 
 /////////////////////////////////////////
 
@@ -92,9 +93,9 @@
 #define RT_CLUSTER_MODE_FULL_CLUSTER 0
 // A cluster that represents a single tessellated region with a triangle (part triangle)
 #define RT_CLUSTER_MODE_SINGLE_TESSELLATED 1
-// A cluster that is a subset of a non-tessellated cluster (result of TESS_USE_1X_TRANSIENTBUILDS) 
+// A cluster that is a subset of a non-tessellated cluster (result of TESS_USE_1X_TRANSIENTBUILDS)
 #define RT_CLUSTER_MODE_1X_SUBSET_CLUSTER 2
-// A cluster that contains a batch of low-tessellated triangles (result of TESS_USE_2X_TRANSIENTBUILDS) 
+// A cluster that contains a batch of low-tessellated triangles (result of TESS_USE_2X_TRANSIENTBUILDS)
 #define RT_CLUSTER_MODE_2X_BATCHED_TESSELLATED 3
 
 /////////////////////////////////////////
@@ -150,7 +151,7 @@
 #endif
 
 #define TESS_2X_MINI_TRIANGLES 4
-#define TESS_2X_MINI_VERTICES  6
+#define TESS_2X_MINI_VERTICES 6
 
 #if TESS_INSTANTIATE_BATCHSIZE > SUBGROUP_SIZE
 #error "invalid TESS_INSTANTIATE_BATCHSIZE"
@@ -158,6 +159,10 @@
 
 #ifndef TESS_USE_PN
 #define TESS_USE_PN 0
+#endif
+
+#ifndef TESS_USE_PERSISTENT_KERNEL
+#define TESS_USE_PERSISTENT_KERNEL 0
 #endif
 
 /////////////////////////////////////////
@@ -195,7 +200,7 @@ struct FrameConstants
   float displacementScale;
   float displacementOffset;
   float lightMixer;
-  uint doShadow;
+  uint  doShadow;
 
   vec3  wUpDir;
   float sceneSize;
@@ -213,7 +218,7 @@ struct FrameConstants
   float   animationRippleSpeed;
 
   uvec3 _pad;
-  uint visualize;
+  uint  visualize;
 
   uint  doAnimation;
   uint  flipWinding;

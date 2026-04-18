@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
 * SPDX-License-Identifier: Apache-2.0
 */
 
@@ -398,9 +398,11 @@ public:
   uint32_t                    m_cycleIndex         = 0;
   size_t                      m_fboChangeID        = ~0;
   glm::vec4                   m_bgColor            = {0.1, 0.13, 0.15, 1.0};
-  bool                        m_supportsClusters   = false;
 
-  bool            m_hbaoFullRes = false;
+  bool m_supportsClusters = false;
+  bool m_dumpSpirv        = false;
+  bool m_hbaoFullRes      = false;
+
   HbaoPass        m_hbaoPass;
   HbaoPass::Frame m_hbaoFrame;
 

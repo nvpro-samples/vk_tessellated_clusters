@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
 * SPDX-License-Identifier: Apache-2.0
 */
 #ifndef _SHADERIO_BUILDING_H_
@@ -73,8 +73,8 @@ struct SubTriangleInfo
   // position within triangle
   // 3 barycentric coordinates for each sub-triangle vertex
   // each 2 x 16 bit uv
-  uvec3    vtxEncoded;
-  
+  uvec3 vtxEncoded;
+
   // tessellation configuration
   // triangle id within cluster 16 bit
   // config 16 bit: 4 bits per edge (3), 1 bit flipped
@@ -150,7 +150,7 @@ struct BlasBuildInfo
 BUFFER_REF_DECLARE_ARRAY(BlasBuildInfos_inout, BlasBuildInfo, , 16);
 
 // The central structure that contains relevant information to
-// perform the runtime tessellation and building of 
+// perform the runtime tessellation and building of
 // all relevant clusters to be rendered in the current frame.
 // (not optimally packed for cache efficiency but readability)
 struct SceneBuilding
@@ -169,16 +169,20 @@ struct SceneBuilding
   int  splitTriangleCounter;
   uint splitReadCounter;
   uint splitWriteCounter;
+  uint splitLevel;
+  uint splitLevelStart;
+  uint splitLevelEnd;
 
   uint     genVertexCounter;
   uint     genClusterCounter;
   uint64_t genClusterDataCounter;
 
   DispatchIndirectCommand dispatchClassify;
+  DispatchIndirectCommand dispatchTriangleSplit;
 
   // instance states store culling/visibility related information
   // result of instance classification
-  BUFFER_REF(uint32s_inout) instanceStates;  
+  BUFFER_REF(uint32s_inout) instanceStates;
 
   // result of traversal / culling
   BUFFER_REF(ClusterInfos_inout) visibleClusters;
@@ -190,30 +194,30 @@ struct SceneBuilding
   // sub-triangle to be rendered (subdivision fits in table)
   // or for transient builds the end of array contains meta information for triangle remapping as well
   BUFFER_REF(TessTriangleInfos_inout) partTriangles;
-  
+
   // rasterization related
   //////////////////////////////////////////////////
-  
+
   DrawMeshTasksIndirectCommandNV drawFullClusters;
   DrawMeshTasksIndirectCommandNV drawPartTriangles;
-  
+
   // ray tracing focused
   //////////////////////////////////////////////////
-  
+
   DispatchIndirectCommand dispatchClusterInstantiate;
   DispatchIndirectCommand dispatchTriangleInstantiate;
   DispatchIndirectCommand dispatchBlasTempInsert;
   DispatchIndirectCommand dispatchBlasTransInsert;
-  
+
   uint positionTruncateBitCount;
-  
+
   uint blasClusterCounter;
   uint tempInstantiateCounter;
   uint transBuildCounter;
-  
+
   // precomputed worst-case CLAS sizes based on number of triangles per cluster
   BUFFER_REF(uint32s_in) basicClusterSizes;
-  
+
   // generated clusters base address
   uint64_t genClusterData;
   // generated vertices for the CLAS build/template instantiation input
@@ -222,14 +226,14 @@ struct SceneBuilding
   // template instantiations
   // these buffers are effecitvely SoA, sized according to the max
   // number of CLAS to be built
-  
+
   // which instance the instantiation belongs to
   BUFFER_REF(uint32s_inout) tempInstanceIDs;
   // indirect instantiation arguments
   BUFFER_REF(TemplateInstantiateInfos_inout) tempInstantiations;
   // after instantiation, contains CLAS addresses
   BUFFER_REF(uint64s_inout) tempClusterAddresses;
-  // 
+  //
   BUFFER_REF(uint32s_inout) tempClusterSizes;
 
   // transient CLAS clusters
@@ -260,7 +264,7 @@ struct SceneBuilding
 
 
 #ifdef __cplusplus
-} // namespace shaderio
+}  // namespace shaderio
 #endif
 
 #endif

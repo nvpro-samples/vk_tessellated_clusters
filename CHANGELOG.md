@@ -1,5 +1,10 @@
 # Changelog for vk_tessellated_clusters
-* 2026-03-29:
+* 2026-4-18:
+  * bugfix crash when exceeding max splits (`BUILD_SETUP_SPLIT` wasn't clamping properly)
+* 2026-4-17:
+  * Add non-persistent triangle split kernel and make it default
+  * Ignore false positive for another mesh-shader related validation error.
+* 2026-3-29:
   * Avoid evaluating tessellation factors twice in `triangle_split.comp.glsl`
   * Always round via `uint(round(floatTessellationFactors))` for stable results.
 * 2025-12-9:

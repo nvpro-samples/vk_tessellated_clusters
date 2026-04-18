@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
 * SPDX-License-Identifier: Apache-2.0
 */
 
@@ -149,14 +149,51 @@ void main()
   }
   else if (push.buildSetup == BUILD_SETUP_SPLIT)
   {
+    uint count = min(buildRW.splitTriangleCounter, MAX_SPLIT_TRIANGLES);
+    buildRW.splitWriteCounter    = count;
+    buildRW.splitTriangleCounter = int(count);
+    buildRW.partTriangleCounter  = buildRW_partTriangleCounter();
+  #if !TESS_USE_PERSISTENT_KERNEL
+    buildRW.splitLevelStart = 0;
+    buildRW.splitLevelEnd   = count;
 
-    buildRW.splitWriteCounter = buildRW.splitTriangleCounter;
-    buildRW.partTriangleCounter = buildRW_partTriangleCounter();
+    buildRW.dispatchTriangleSplit.gridX = (count + TRIANGLE_SPLIT_WORKGROUP - 1) / TRIANGLE_SPLIT_WORKGROUP;
+    buildRW.dispatchTriangleSplit.gridY = 1;
+    buildRW.dispatchTriangleSplit.gridZ = 1;
 
+    // readback.debugA[0] = 0;
+    // readback.debugB[0] = count;
+    // readback.debugC[0] = count;
+
+  #endif
+  }
+  else if (push.buildSetup == BUILD_SETUP_SPLIT_LEVEL)
+  {
+  #if !TESS_USE_PERSISTENT_KERNEL
+    uint level = buildRW.splitLevel + 1;
+    buildRW.splitLevel = level;
+
+    // begin at last end
+    uint start = min(buildRW.splitLevelEnd, MAX_SPLIT_TRIANGLES);
+    // end at current write position
+    uint end   = min(buildRW.splitWriteCounter, MAX_SPLIT_TRIANGLES);
+
+    buildRW.splitLevelStart = start;
+    buildRW.splitLevelEnd   = end;
+
+    uint count = end - start;
+
+    buildRW.dispatchTriangleSplit.gridX = (count + TRIANGLE_SPLIT_WORKGROUP - 1) / TRIANGLE_SPLIT_WORKGROUP;
+    buildRW.dispatchTriangleSplit.gridY = 1;
+    buildRW.dispatchTriangleSplit.gridZ = 1;
+
+    // readback.debugA[level] = start;
+    // readback.debugB[level] = end;
+    // readback.debugC[level] = count;
+  #endif
   }
   else if (push.buildSetup == BUILD_SETUP_BUILD_BLAS)
   {
-
     const uint maxEntries = MAX_GENERATED_CLUSTERS;
     uint counterTemp = buildRW.tempInstantiateCounter;
   #if TESS_USE_TRANSIENTBUILDS

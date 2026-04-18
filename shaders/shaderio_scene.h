@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
 * SPDX-License-Identifier: Apache-2.0
 */
 
@@ -21,6 +21,9 @@
 #define _SHADERIO_SCENE_H_
 
 #include "shaderio_core.h"
+
+// 16-bit coords, each iteration splits by max factor 8
+#define TESS_MAX_TRIANGLE_SPLIT_LEVELS 5
 
 #ifdef __cplusplus
 namespace shaderio {
@@ -123,7 +126,7 @@ struct RenderInstance
   // spatial information for the object
   mat4 worldMatrix;
 
-  // The geometry information 
+  // The geometry information
   // We avoided another indirection into a unique geometry array
   // and just inlined the data. In a scenario of millions of instances,
   // we would keep the instance more light-weight and use indirection.
@@ -161,7 +164,7 @@ struct RenderInstance
 };
 
 #ifdef __cplusplus
-} // namespace shaderio
+}  // namespace shaderio
 #endif
 
 #endif

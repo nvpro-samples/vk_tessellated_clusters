@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,12 +13,13 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
 * SPDX-License-Identifier: Apache-2.0
 */
 
 #include <nvutils/file_operations.hpp>
 #include <nvutils/logger.hpp>
+#include <nvutils/spirv.hpp>
 #include <nvvk/barriers.hpp>
 #include <nvvk/formats.hpp>
 
@@ -535,6 +536,14 @@ bool Resources::compileShader(shaderc::SpvCompilationResult& compiled,
   compiled = m_glslCompiler.compileFile(filePath, nvvkglsl::getShaderKind(shaderStage), options);
   if(compiled.GetCompilationStatus() == shaderc_compilation_status_success)
   {
+    if(m_dumpSpirv)
+    {
+      // dump spirv files for improved aftermath debugging
+      std::filesystem::path dumpFile = filePath.filename();
+      dumpFile.replace_extension("spirv");
+
+      nvutils::dumpSpirv(dumpFile, nvvkglsl::GlslCompiler::getSpirv(compiled), nvvkglsl::GlslCompiler::getSpirvSize(compiled));
+    }
     return true;
   }
   else

@@ -529,6 +529,7 @@ You can use the commandline to change some defaults:
 - Provide an alternative open-source tessellation table beyond the version derived from Unreal Engine.
 - Adaptive tessellation based on culling results for ray tracing: It might be better to gradually reduce tessellation of invisible objects. Currently the sample does a per-instance decision that is binary and therefore shadows of an invisible object might pop if an object becomes visible. One could fade tessellation rate based on distance to frustum planes for instances outside, and for occluded objects a time-based fading could be used. Alternatively, the [DirectX 12 sample](https://github.com/NVIDIA-RTX/RTXMG) on subdivision surface tessellation does use occlusion culling information on a per-patch level.
 - The tessellation factors are calculated based on the un-displaced vertices to reduce complexity of the sample.
+- Reduce memory consumption for rasterizer's low-tessellated triangles.
 - EXT_mesh_shader support
 
 ## Limitations

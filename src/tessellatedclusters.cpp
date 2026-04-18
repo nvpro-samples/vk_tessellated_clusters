@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
+* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
+* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
 * SPDX-License-Identifier: Apache-2.0
 */
 
@@ -52,6 +52,7 @@ TessellatedClusters::TessellatedClusters(const Info& info)
   m_info.parameterRegistry->add({"overridetime"}, &m_tweak.overrideTime);
   m_info.parameterRegistry->add({"processingthreadpct", "float percentage of threads during initial file load and processing into lod clusters, default 0.5 == 50 %"},
                                 &m_sceneConfig.processingThreadsPct);
+  m_info.parameterRegistry->add({"dumpspirv", "dumps compiled spirv into working directory"}, &m_resources.m_dumpSpirv);
 
   m_frameConfig.frameConstants                         = {};
   m_frameConfig.frameConstants.ambientOcclusionSamples = 1;
@@ -466,7 +467,7 @@ void TessellatedClusters::handleChanges()
   if(sceneChanged || shaderChanged || tweakChanged(m_tweak.renderer) || tweakChanged(m_tweak.gridCopies)
      || tweakChanged(m_tweak.gridConfig) || rendererCfgChanged(m_rendererConfig.flipWinding)
      || rendererCfgChanged(m_rendererConfig.doAnimation) || rendererCfgChanged(m_rendererConfig.doCulling)
-     || rendererCfgChanged(m_rendererConfig.persistentThreads)
+     || rendererCfgChanged(m_rendererConfig.persistentThreads) || rendererCfgChanged(m_rendererConfig.persistentKernel)
      || (m_renderer
          && (rendererCfgChanged(m_rendererConfig.positionTruncateBits) || rendererCfgChanged(m_rendererConfig.pnDisplacement)
              || rendererCfgChanged(m_rendererConfig.numVisibleClusterBits) || rendererCfgChanged(m_rendererConfig.numSplitTriangleBits)

@@ -113,7 +113,8 @@ int main(int argc, char** argv)
     // some false positives
     validationSettings.message_id_filter = {"VUID-RuntimeSpirv-storageInputOutput16-06334", "VUID-VkShaderModuleCreateInfo-pCode-08740",
                                             "VUID-vkCmdBuildClusterAccelerationStructureIndirectNV-pCommandInfos-12307",
-                                            "VUID-vkCmdBuildClusterAccelerationStructureIndirectNV-dstImplicitData-12303"};
+                                            "VUID-vkCmdBuildClusterAccelerationStructureIndirectNV-dstImplicitData-12303",
+                                            "VUID-RuntimeSpirv-storageInputOutput16-11162"};
 
     vkSetup.instanceCreateInfoExt = validationSettings.buildPNextChain();
   }

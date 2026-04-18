@@ -27,8 +27,11 @@
   A single thread can represent one splitting task, as well as a sub-triangle
   child of splitting operations.
 
-  The shader is configured to be run using persistent threads. A fixed amount of 
-  threads implement a producer/consumer queuing mechanism to handle the splitting.
+  The shader can be configured to be run using persistent threads or not.
+
+  TESS_USE_PERSISTENT_KERNEL == 1
+  A fixed amount of threads implement a producer/consumer queuing mechanism to 
+  handle the splitting.
 
   The producer/consumer queue is implemented by the following variables:
   
@@ -41,6 +44,14 @@
 
   The queue is seeded within `cluster_classify.comp.glsl` whenever a triangle's subdivison
   was too high.
+
+  TESS_USE_PERSISTENT_KERNEL == 0
+  In this case we process the splitting level-wise. After each level we run a fixup kernel
+  (see `build_setup.comp.glsl` and `BUILD_SETUP_SPLIT_LEVEL`) that computes the dispatch grid
+  size for the next level. We still use `build.splitTriangles` and `build.splitWriteCounter`
+  to write into it. However, there is no need for a `build.splitReadCounter`, instead we provide
+  the last level's starting position (based on `build.splitWriteCounter`) as read position and
+  sum it with the thread indices in the dispatch.
   
   Furthermore all sub-triangles that are to be rendered are output via:
     - `build.partTriangles` stores all partial sub-triangles that are to be rendered as linear array
@@ -73,6 +84,8 @@
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_clustered : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
+
+#define DO_DEBUG 1
   
 ////////////////////////
 
@@ -208,12 +221,11 @@ void processSubTask(const TessTriangleInfo subgroupTasks, uint taskID, uint task
   tessInfo.subTriangle.vtxEncoded        = subgroupShuffle(subgroupTasks.subTriangle.vtxEncoded, taskID);
   tessInfo.subTriangle.triangleID_config = subgroupShuffle(subgroupTasks.subTriangle.triangleID_config, taskID);
 
-
   // modify encoded vtx according to sub-triangle
   uint cfg = tessInfo.subTriangle.triangleID_config >> 16;
   
   // compute tessellation factor
-  uvec4 factors;
+  uvec4 factors = uvec4(0);
   vec3 baseBarycentrics[3];
   if (isValid)
   {
@@ -255,8 +267,10 @@ void processSubTask(const TessTriangleInfo subgroupTasks, uint taskID, uint task
   if (subgroupElect())
   {
     offsetSplit = atomicAdd(buildRW.splitWriteCounter, countSplit);
-    atomicAdd(buildRW.splitTriangleCounter, int(countSplit));
     offsetPart  = build_atomicAdd_partTriangleCounter(countPart);
+  #if TESS_USE_PERSISTENT_KERNEL
+    atomicAdd(buildRW.splitTriangleCounter, int(countSplit));
+  #endif
   }
   memoryBarrierBuffer();
   
@@ -281,18 +295,24 @@ void processSubTask(const TessTriangleInfo subgroupTasks, uint taskID, uint task
   
   if (requiresSplitTess && offsetSplit < MAX_SPLIT_TRIANGLES)
   {
-    // need to split again
-  #if USE_ATOMIC_LOAD_STORE
-    atomicStore(build.splitTriangles.d[offsetSplit].cluster.clusterID, tessInfo.cluster.clusterID, gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsRelease);
-    atomicStore(build.splitTriangles.d[offsetSplit].cluster.instanceID, tessInfo.cluster.instanceID, gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsRelease);
-    atomicStore(build.splitTriangles.d[offsetSplit].subTriangle.vtxEncoded.x, tessInfo.subTriangle.vtxEncoded.x, gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsRelease);
-    atomicStore(build.splitTriangles.d[offsetSplit].subTriangle.vtxEncoded.y, tessInfo.subTriangle.vtxEncoded.y, gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsRelease);
-    atomicStore(build.splitTriangles.d[offsetSplit].subTriangle.vtxEncoded.z, tessInfo.subTriangle.vtxEncoded.z, gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsRelease);
-    atomicStore(build.splitTriangles.d[offsetSplit].subTriangle.triangleID_config, tessInfo.subTriangle.triangleID_config, gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsRelease);
+  #if TESS_USE_PERSISTENT_KERNEL
+      // need to split again
+    #if USE_ATOMIC_LOAD_STORE
+      atomicStore(build.splitTriangles.d[offsetSplit].cluster.clusterID, tessInfo.cluster.clusterID, gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsRelease);
+      atomicStore(build.splitTriangles.d[offsetSplit].cluster.instanceID, tessInfo.cluster.instanceID, gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsRelease);
+      atomicStore(build.splitTriangles.d[offsetSplit].subTriangle.vtxEncoded.x, tessInfo.subTriangle.vtxEncoded.x, gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsRelease);
+      atomicStore(build.splitTriangles.d[offsetSplit].subTriangle.vtxEncoded.y, tessInfo.subTriangle.vtxEncoded.y, gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsRelease);
+      atomicStore(build.splitTriangles.d[offsetSplit].subTriangle.vtxEncoded.z, tessInfo.subTriangle.vtxEncoded.z, gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsRelease);
+      atomicStore(build.splitTriangles.d[offsetSplit].subTriangle.triangleID_config, tessInfo.subTriangle.triangleID_config, gl_ScopeDevice, gl_StorageSemanticsBuffer, gl_SemanticsRelease);
+    #else
+      build.splitTriangles.d[offsetSplit] = tessInfo;
+    #endif
+      memoryBarrierBuffer();
   #else
-    build.splitTriangles.d[offsetSplit] = tessInfo;
+    // non-coherent version as we cleared caches
+    TessTriangleInfos_inout splitTriangles = TessTriangleInfos_inout(build.splitTriangles);
+    splitTriangles.d[offsetSplit] = tessInfo;
   #endif
-    memoryBarrierBuffer();    
   }
   else if (requiresPartTess && offsetPart < MAX_PART_TRIANGLES)
   {
@@ -367,7 +387,7 @@ void processAllSubTasks(inout TessTriangleInfo tessInfo, bool splitValid, int su
   {
     uint taskID = int(s_tasks[subgroupOffset + task].taskID);
     uint taskSubCount = subgroupShuffle(subCount, taskID);
-  #if 0
+  #if DO_DEBUG
     // only relevant for debugging
     uint taskReadIndex = subgroupShuffle(threadReadIndex, taskID); 
   #else
@@ -432,7 +452,7 @@ void processAllSubTasks(inout TessTriangleInfo tessInfo, bool splitValid, int su
     
     uint taskSubID    = t - subgroupShuffle(startOffset, taskID);
     uint taskSubCount = subgroupShuffle(subCount, taskID);
-  #if 0
+  #if DO_DEBUG
     // only relevant for debugging
     uint taskReadIndex = subgroupShuffle(threadReadIndex, taskID); 
   #else
@@ -451,7 +471,8 @@ void processAllSubTasks(inout TessTriangleInfo tessInfo, bool splitValid, int su
 
 ////////////////////////////////////////////
 
-void main()
+#if TESS_USE_PERSISTENT_KERNEL
+void main_persistent()
 {
   // This implements a persistent kernel that implements
   // a producer/consumer loop.
@@ -569,3 +590,52 @@ void main()
     }
   }
 }
+void main()
+{
+  main_persistent();
+}
+
+#else
+
+void main_levelwise()
+{
+  uint threadReadIndex = gl_GlobalInvocationID.x + build.splitLevelStart;
+  bool threadRunnable  = threadReadIndex < build.splitLevelEnd;
+  uint pass = build.splitLevel;
+
+  TessTriangleInfo tessInfo;
+  if (threadRunnable)
+  {
+    // non-coherent version as we cleared caches
+    TessTriangleInfos_inout splitTriangles = TessTriangleInfos_inout(build.splitTriangles);
+    tessInfo = splitTriangles.d[threadReadIndex];
+  }
+
+  if (subgroupAny(threadRunnable))
+  {
+      int threadSubCount = 0;
+      
+      if (threadRunnable)
+      {
+        threadSubCount = int(setupTask(tessInfo, threadReadIndex, pass));
+      }
+      
+      // Now process all tasks, we do this in a packed fashion, so that
+      // we attempt to fill the subgroup densely. This results in processing over work
+      // in multiple iterations within the subgroup. As a result tasks may
+      // straddle the subgroup.
+      
+      // we currently mix node/group tasks across the subgroup
+      // this should be mostly okayish as both require traversal logic to be run
+      // which depends on the same input data types.
+      
+      processAllSubTasks(tessInfo, threadRunnable, threadSubCount, threadReadIndex, pass);
+  }
+
+}
+void main()
+{
+  main_levelwise();
+}
+
+#endif
