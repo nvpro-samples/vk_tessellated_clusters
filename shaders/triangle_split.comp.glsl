@@ -272,7 +272,9 @@ void processSubTask(const TessTriangleInfo subgroupTasks, uint taskID, uint task
     atomicAdd(buildRW.splitTriangleCounter, int(countSplit));
   #endif
   }
+#if TESS_USE_PERSISTENT_KERNEL
   memoryBarrierBuffer();
+#endif
   
   offsetSplit = subgroupBroadcastFirst(offsetSplit);
   offsetSplit += subgroupBallotExclusiveBitCount(voteSplit);
