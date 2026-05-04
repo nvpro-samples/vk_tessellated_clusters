@@ -169,9 +169,9 @@ struct SceneBuilding
   int  splitTriangleCounter;
   uint splitReadCounter;
   uint splitWriteCounter;
-  uint splitLevel;
-  uint splitLevelStart;
-  uint splitLevelEnd;
+  uint splitPass;
+  uint splitPassStart;
+  uint splitPassEnd;
 
   uint     genVertexCounter;
   uint     genClusterCounter;

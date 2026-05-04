@@ -592,18 +592,14 @@ void main_persistent()
     }
   }
 }
-void main()
-{
-  main_persistent();
-}
 
 #else
 
-void main_levelwise()
+void main_multipass()
 {
-  uint threadReadIndex = gl_GlobalInvocationID.x + build.splitLevelStart;
-  bool threadRunnable  = threadReadIndex < build.splitLevelEnd;
-  uint pass = build.splitLevel;
+  uint threadReadIndex = gl_GlobalInvocationID.x + build.splitPassStart;
+  bool threadRunnable  = threadReadIndex < build.splitPassEnd;
+  uint pass = build.splitPass;
 
   TessTriangleInfo tessInfo;
   if (threadRunnable)
@@ -633,11 +629,14 @@ void main_levelwise()
       
       processAllSubTasks(tessInfo, threadRunnable, threadSubCount, threadReadIndex, pass);
   }
-
 }
+#endif
+
 void main()
 {
-  main_levelwise();
-}
-
+#if TESS_USE_PERSISTENT_KERNEL
+  main_persistent();
+#else
+  main_multipass();
 #endif
+}

@@ -100,6 +100,8 @@ bool RendererRasterClustersTess::initShaders(Resources& res, Scene& scene, const
   options.AddMacroDefinition("TESS_USE_1X_TRANSIENTBUILDS", "0");
   options.AddMacroDefinition("TESS_USE_2X_TRANSIENTBUILDS", "0");
   options.AddMacroDefinition("TESS_USE_PERSISTENT_KERNEL", fmt::format("{}", config.persistentKernel ? 1 : 0));
+  options.AddMacroDefinition("TESS_MAX_SPLIT_FACTOR",
+                             fmt::format("{}", std::max(2u, std::min(config.splitFactor, uint32_t(TESSTABLE_SIZE)))));
   options.AddMacroDefinition("TESS_ACTIVE", "1");
   options.AddMacroDefinition("MAX_PART_TRIANGLES", fmt::format("{}", 1 << config.numPartTriangleBits));
   options.AddMacroDefinition("MAX_VISIBLE_CLUSTERS", fmt::format("{}", 1 << config.numVisibleClusterBits));
@@ -406,11 +408,14 @@ void RendererRasterClustersTess::render(VkCommandBuffer cmd, Resources& res, Sce
       }
       else
       {
-        for(uint32_t i = 0; i < TESS_MAX_TRIANGLE_SPLIT_LEVELS; i++)
+        uint32_t coord = TESSTABLE_COORD_MAX;
+        while(coord > m_config.splitFactor)
         {
+          coord /= m_config.splitFactor;
+
           vkCmdDispatchIndirect(cmd, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, dispatchTriangleSplit));
 
-          if(i < TESS_MAX_TRIANGLE_SPLIT_LEVELS - 1)
+          if(coord > m_config.splitFactor)
           {
             memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
             memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
@@ -418,7 +423,7 @@ void RendererRasterClustersTess::render(VkCommandBuffer cmd, Resources& res, Sce
                                  &memBarrier, 0, nullptr, 0, nullptr);
 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelines.computeBuildSetup);
-            uint32_t buildSetupID = BUILD_SETUP_SPLIT_LEVEL;
+            uint32_t buildSetupID = BUILD_SETUP_SPLIT_PASS;
             vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &buildSetupID);
             vkCmdDispatch(cmd, 1, 1, 1);
 

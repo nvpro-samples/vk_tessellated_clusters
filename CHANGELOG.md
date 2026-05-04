@@ -1,4 +1,6 @@
 # Changelog for vk_tessellated_clusters
+* 2026-4-22:
+  * expose "Tessellation: Max split factor" (TESS_MAX_SPLIT_FACTOR) to control the triangle split recursion logic.
 * 2026-4-18:
   * bugfix crash when exceeding max splits (`BUILD_SETUP_SPLIT` wasn't clamping properly)
 * 2026-4-17:

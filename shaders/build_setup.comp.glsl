@@ -154,32 +154,30 @@ void main()
     buildRW.splitTriangleCounter = int(count);
     buildRW.partTriangleCounter  = buildRW_partTriangleCounter();
   #if !TESS_USE_PERSISTENT_KERNEL
-    buildRW.splitLevelStart = 0;
-    buildRW.splitLevelEnd   = count;
+    buildRW.splitPassStart = 0;
+    buildRW.splitPassEnd   = count;
 
     buildRW.dispatchTriangleSplit.gridX = (count + TRIANGLE_SPLIT_WORKGROUP - 1) / TRIANGLE_SPLIT_WORKGROUP;
     buildRW.dispatchTriangleSplit.gridY = 1;
     buildRW.dispatchTriangleSplit.gridZ = 1;
 
-    // readback.debugA[0] = 0;
-    // readback.debugB[0] = count;
-    // readback.debugC[0] = count;
+    // readback.debugA[0] = count;
 
   #endif
   }
-  else if (push.buildSetup == BUILD_SETUP_SPLIT_LEVEL)
+  else if (push.buildSetup == BUILD_SETUP_SPLIT_PASS)
   {
   #if !TESS_USE_PERSISTENT_KERNEL
-    uint level = buildRW.splitLevel + 1;
-    buildRW.splitLevel = level;
+    uint pass = buildRW.splitPass + 1;
+    buildRW.splitPass = pass;
 
     // begin at last end
-    uint start = min(buildRW.splitLevelEnd, MAX_SPLIT_TRIANGLES);
+    uint start = min(buildRW.splitPassEnd, MAX_SPLIT_TRIANGLES);
     // end at current write position
     uint end   = min(buildRW.splitWriteCounter, MAX_SPLIT_TRIANGLES);
 
-    buildRW.splitLevelStart = start;
-    buildRW.splitLevelEnd   = end;
+    buildRW.splitPassStart = start;
+    buildRW.splitPassEnd   = end;
 
     uint count = end - start;
 
@@ -187,9 +185,7 @@ void main()
     buildRW.dispatchTriangleSplit.gridY = 1;
     buildRW.dispatchTriangleSplit.gridZ = 1;
 
-    // readback.debugA[level] = start;
-    // readback.debugB[level] = end;
-    // readback.debugC[level] = count;
+    // readback.debugA[pass] = count;
   #endif
   }
   else if (push.buildSetup == BUILD_SETUP_BUILD_BLAS)

@@ -68,7 +68,7 @@
 #define BUILD_SETUP_INSTANTIATE_TESS 1
 #define BUILD_SETUP_DRAW_TESS 2
 #define BUILD_SETUP_SPLIT 3
-#define BUILD_SETUP_SPLIT_LEVEL 4
+#define BUILD_SETUP_SPLIT_PASS 4
 #define BUILD_SETUP_BUILD_BLAS 5
 
 /////////////////////////////////////////
@@ -148,6 +148,10 @@
 
 #ifndef TESS_2X_MINI_BATCHSIZE
 #define TESS_2X_MINI_BATCHSIZE 8
+#endif
+
+#ifndef TESS_MAX_SPLIT_FACTOR
+#define TESS_MAX_SPLIT_FACTOR 8
 #endif
 
 #define TESS_2X_MINI_TRIANGLES 4

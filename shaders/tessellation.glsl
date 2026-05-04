@@ -100,7 +100,7 @@ vec3 tess_getTessFactors(vec3 wPosA, vec3 wPosB, vec3 wPosC)
 
 uvec3 tess_getSplitFactor(uvec3 tessFactor)
 {
-  return min((tessFactor + TESSTABLE_SIZE - 1) / TESSTABLE_SIZE, uvec3(8));
+  return min((tessFactor + TESSTABLE_SIZE - 1) / TESSTABLE_SIZE, uvec3(TESS_MAX_SPLIT_FACTOR));
 }
 
 uint tess_getConfigIndex(uint cfg)

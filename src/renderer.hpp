@@ -58,6 +58,7 @@ struct RendererConfig
   size_t   numGeneratedClusterMegs  = 1024;
 
   uint32_t persistentThreads = 0;
+  uint32_t splitFactor       = 8;
 
   VkBuildAccelerationStructureFlagsKHR clusterBlasFlags         = 0;
   VkBuildAccelerationStructureFlagsKHR clusterBuildFlags        = 0;

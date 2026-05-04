@@ -53,6 +53,7 @@ TessellatedClusters::TessellatedClusters(const Info& info)
   m_info.parameterRegistry->add({"processingthreadpct", "float percentage of threads during initial file load and processing into lod clusters, default 0.5 == 50 %"},
                                 &m_sceneConfig.processingThreadsPct);
   m_info.parameterRegistry->add({"dumpspirv", "dumps compiled spirv into working directory"}, &m_resources.m_dumpSpirv);
+  m_info.parameterRegistry->add({"splitfactor"}, &m_rendererConfig.splitFactor);
 
   m_frameConfig.frameConstants                         = {};
   m_frameConfig.frameConstants.ambientOcclusionSamples = 1;
@@ -465,17 +466,16 @@ void TessellatedClusters::handleChanges()
 
   bool rendererChanged = false;
   if(sceneChanged || shaderChanged || tweakChanged(m_tweak.renderer) || tweakChanged(m_tweak.gridCopies)
-     || tweakChanged(m_tweak.gridConfig) || rendererCfgChanged(m_rendererConfig.flipWinding)
-     || rendererCfgChanged(m_rendererConfig.doAnimation) || rendererCfgChanged(m_rendererConfig.doCulling)
-     || rendererCfgChanged(m_rendererConfig.persistentThreads) || rendererCfgChanged(m_rendererConfig.persistentKernel)
-     || (m_renderer
-         && (rendererCfgChanged(m_rendererConfig.positionTruncateBits) || rendererCfgChanged(m_rendererConfig.pnDisplacement)
-             || rendererCfgChanged(m_rendererConfig.numVisibleClusterBits) || rendererCfgChanged(m_rendererConfig.numSplitTriangleBits)
-             || rendererCfgChanged(m_rendererConfig.numGeneratedVerticesBits)
-             || rendererCfgChanged(m_rendererConfig.numPartTriangleBits) || rendererCfgChanged(m_rendererConfig.numGeneratedClusterMegs)
-             || rendererCfgChanged(m_rendererConfig.transientClusters1X) || rendererCfgChanged(m_rendererConfig.transientClusters2X)
-             || tweakChanged(m_tweak.clusterBuildMode) || rendererCfgChanged(m_rendererConfig.rasterBatchMeshlets)))
-     || rendererCfgChanged(m_rendererConfig.debugVisualization))
+     || tweakChanged(m_tweak.gridConfig) || tweakChanged(m_tweak.clusterBuildMode)
+     || rendererCfgChanged(m_rendererConfig.flipWinding) || rendererCfgChanged(m_rendererConfig.doAnimation)
+     || rendererCfgChanged(m_rendererConfig.doCulling) || rendererCfgChanged(m_rendererConfig.persistentThreads)
+     || rendererCfgChanged(m_rendererConfig.persistentKernel) || rendererCfgChanged(m_rendererConfig.positionTruncateBits)
+     || rendererCfgChanged(m_rendererConfig.pnDisplacement) || rendererCfgChanged(m_rendererConfig.numVisibleClusterBits)
+     || rendererCfgChanged(m_rendererConfig.numSplitTriangleBits)
+     || rendererCfgChanged(m_rendererConfig.numGeneratedVerticesBits) || rendererCfgChanged(m_rendererConfig.numPartTriangleBits)
+     || rendererCfgChanged(m_rendererConfig.numGeneratedClusterMegs) || rendererCfgChanged(m_rendererConfig.transientClusters1X)
+     || rendererCfgChanged(m_rendererConfig.transientClusters2X) || rendererCfgChanged(m_rendererConfig.rasterBatchMeshlets)
+     || rendererCfgChanged(m_rendererConfig.splitFactor) || rendererCfgChanged(m_rendererConfig.debugVisualization))
   {
     rendererChanged = true;
 

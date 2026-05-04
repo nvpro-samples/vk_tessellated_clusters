@@ -457,6 +457,8 @@ void TessellatedClusters::onUIRender()
     PE::InputIntClamped("Pixels per segment", (int*)&m_tweak.tessRatePixels, 0, 128, 1, 1,
                         ImGuiInputTextFlags_EnterReturnsTrue, "Set to 0 to disable tessellation");
     ImGui::PopStyleColor();
+    PE::InputIntClamped("Max split factor", (int*)&m_rendererConfig.splitFactor, 2, TESSTABLE_SIZE, 1, 1,
+                        ImGuiInputTextFlags_EnterReturnsTrue);
     PE::Checkbox("PN-Triangles displacement", &m_rendererConfig.pnDisplacement);
     PE::InputIntClamped("Max part triangles in bits", (int*)&m_rendererConfig.numPartTriangleBits, 4, 24, 1, 1,
                         ImGuiInputTextFlags_EnterReturnsTrue);

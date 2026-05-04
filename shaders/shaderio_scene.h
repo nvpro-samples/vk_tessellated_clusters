@@ -22,8 +22,8 @@
 
 #include "shaderio_core.h"
 
-// 16-bit coords, each iteration splits by max factor 8
-#define TESS_MAX_TRIANGLE_SPLIT_LEVELS 5
+#define TESSTABLE_COORD_MAX (1 << 15)
+#define TESSTABLE_SIZE 11
 
 #ifdef __cplusplus
 namespace shaderio {
@@ -42,10 +42,6 @@ using namespace glm;
 #define TESSTABLE_LOOKUP_SIZE 16
 #endif
 
-#ifndef TESSTABLE_SIZE
-#define TESSTABLE_SIZE 11
-#endif
-
 #ifndef TESSTABLE_MAX_TRIANGLES
 #define TESSTABLE_MAX_TRIANGLES (TESSTABLE_SIZE * TESSTABLE_SIZE)
 #endif
@@ -60,10 +56,6 @@ using namespace glm;
 
 #define TESS_RASTER_BATCH_VERTICES 96
 #define TESS_RASTER_BATCH_TRIANGLES (TESSTABLE_MAX_TRIANGLES)
-
-#ifndef TESSTABLE_COORD_MAX
-#define TESSTABLE_COORD_MAX (1 << 15)
-#endif
 
 #endif
 
