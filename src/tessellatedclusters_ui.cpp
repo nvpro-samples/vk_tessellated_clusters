@@ -264,7 +264,7 @@ void TessellatedClusters::onUIRender()
       const glm::vec3 hitPos   = glm::unProjectZO({mousePos.x, mousePos.y, d}, view, proj, win_norm);
 
       // Set the interest position
-      glm::vec3 eye, center, up;
+      glm::dvec3 eye, center, up;
       m_info.cameraManipulator->getLookat(eye, center, up);
       m_info.cameraManipulator->setLookat(eye, hitPos, up, false);
     }

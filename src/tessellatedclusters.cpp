@@ -562,12 +562,12 @@ void TessellatedClusters::onRender(VkCommandBuffer cmd)
     frameConstants.viewport    = glm::ivec2(renderWidth, renderHeight);
     frameConstants.viewportf   = glm::vec2(renderWidth, renderHeight);
     frameConstants.supersample = m_tweak.supersample;
-    frameConstants.nearPlane   = m_info.cameraManipulator->getClipPlanes().x;
-    frameConstants.farPlane    = m_info.cameraManipulator->getClipPlanes().y;
-    frameConstants.wUpDir      = m_info.cameraManipulator->getUp();
+    frameConstants.nearPlane   = float(m_info.cameraManipulator->getClipPlanes().x);
+    frameConstants.farPlane    = float(m_info.cameraManipulator->getClipPlanes().y);
+    frameConstants.wUpDir      = glm::vec3(m_info.cameraManipulator->getUp());
 
-    glm::mat4 projection = glm::perspectiveRH_ZO(glm::radians(m_info.cameraManipulator->getFov()), float(width) / float(height),
-                                                 frameConstants.nearPlane, frameConstants.farPlane);
+    glm::mat4 projection = glm::perspectiveRH_ZO(glm::radians(float(m_info.cameraManipulator->getFov())),
+                                                 float(width) / float(height), frameConstants.nearPlane, frameConstants.farPlane);
     projection[1][1] *= -1;
 
     glm::mat4 view  = m_info.cameraManipulator->getViewMatrix();
