@@ -17,7 +17,15 @@
 * SPDX-License-Identifier: Apache-2.0
 */
 
+#if 1
+// by default we use a table that doesn't have dependencies on Unreal Engine license terms.
+#include "tessellation_table_nv_raw.hpp"
+#else
+// the Unreal Engine derived version of the table can be found here:
+// https://github.com/nvpro-samples/vk_tessellated_clusters/blob/92cc4aac8a556e3fde31619230dc33eec360baf1/thirdparty/epicgames_tessellation/tessellation_table_epicgames_raw.hpp
 #include <epicgames_tessellation/tessellation_table_epicgames_raw.hpp>
+#endif
+
 #include <glm/glm.hpp>
 
 #include "tessellation_table.hpp"

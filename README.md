@@ -112,11 +112,8 @@ struct TessellationTable
 
 Just like for the regular geometry we pre-generate the **cluster templates** for each pattern.
 
-> NOTE: Special thanks to [**Epic Games**](https://www.epicgames.com/) for allowing the usage of a tessellation table that was derived from `Unreal Engine 5.4`.
-> Brian Karis from Epic Games designed the specifics of the triangle distribution as well as indexing logic that re-uses the patterns efficiently.
-> This sample reduced the upper size of the table to 11 segments to fit within 128 triangles per cluster.
-> While they derived the re-use of patterns independently, Brian Karis pointed to [Optimized Pattern-Based Adaptive Mesh Refinement Using GPU by Lenz et al.](https://www.researchgate.net/publication/221337741_Optimized_Pattern-Based_Adaptive_Mesh_Refinement_Using_GPU), who developed the same optimization and they
-> refer to [A Flexible Kernel for Adaptive Mesh Refinement on GPU by Boubekeur et al.](https://inria.hal.science/inria-00260825/document/) for the principle setup of using tables.
+> NOTE: Special thanks to [**Epic Games**](https://www.epicgames.com/) for originally allowing the usage of a tessellation table that was derived from `Unreal Engine 5.4`.
+> However, we have since replaced it with our own open-source version, using hints provided on [Brian Karis' blog](https://graphicrants.blogspot.com/2026/02/how-to-tessellate.html).
 
 ### Runtime Operations
 
@@ -566,14 +563,12 @@ We also recommend having a look at [RTX Mega Geometry](https://github.com/NVIDIA
 
 ## Acknowledgements
 
-We would like to thank [**Epic Games**](https://www.epicgames.com/) for allowing the use of their nanite tessellation table. Furthermore, the idea of using a persistent kernel,
+We would like to thank [**Epic Games**](https://www.epicgames.com/) for originally allowing the use of their nanite tessellation table, although the sample no longer ships with it and now uses an open-source version. Furthermore, the idea of using a persistent kernel,
 that splits triangles recursively, was inspired from how `Unreal Engine 5.4` implements nanite tessellation.
 
 ## Third Party
 
 [meshoptimizer](https://github.com/zeux/meshoptimizer) is used to build and optimize the clusters.
-
-This sample uses [data](/thirdparty/epicgames_tessellation/tessellation_table_epicgames_raw.hpp) derived from `Unreal Engine` which uses its own licensing terms.
 
 It uses a modified version of [cgltf](https://github.com/jkuhlmann/cgltf) by Johannes Kuhlmann. The unofficial [`KHR_materials_displacement`](https://github.com/KhronosGroup/glTF/issues/948) extension was added.
 

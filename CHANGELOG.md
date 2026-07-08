@@ -1,4 +1,6 @@
 # Changelog for vk_tessellated_clusters
+* 2026-7-2:
+  * new open-source tessellation table `tessellation_table_nv_raw.hpp` which no longer is directly derived from Unreal Engine's implementation. Thanks to Andrea Maggiordomo <amaggiordomo@nvidia.com> for the work on it.
 * 2026-4-22:
   * expose "Tessellation: Max split factor" (TESS_MAX_SPLIT_FACTOR) to control the triangle split recursion logic.
 * 2026-4-18:
