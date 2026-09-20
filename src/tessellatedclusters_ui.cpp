@@ -536,7 +536,7 @@ void TessellatedClusters::onUIRender()
                         ImGuiInputTextFlags_EnterReturnsTrue);
     PE::entry(
         "Transient CLAS build mode",
-        [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##HiddenID", &m_tweak.clusterBuildMode); }, "Transient CLAS build mode");
+        [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##HiddenID1", &m_tweak.clusterBuildMode); }, "Transient CLAS build mode");
     PE::end();
   }
 
