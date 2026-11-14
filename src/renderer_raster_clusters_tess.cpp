@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include <nvutils/alignment.hpp>
 #include <fmt/format.h>
@@ -41,19 +27,19 @@ private:
 
   struct Shaders
   {
-    shaderc::SpvCompilationResult meshShaderFull;
-    shaderc::SpvCompilationResult meshShaderTess;
-    shaderc::SpvCompilationResult meshShaderTessBatched;
-    shaderc::SpvCompilationResult taskShaderTessBatched;
-    shaderc::SpvCompilationResult fragmentShader;
+    Shader meshShaderFull;
+    Shader meshShaderTess;
+    Shader meshShaderTessBatched;
+    Shader taskShaderTessBatched;
+    Shader fragmentShader;
 
-    shaderc::SpvCompilationResult computeInstancesClassify;
+    Shader computeInstancesClassify;
 
-    shaderc::SpvCompilationResult computeClustersCull;
-    shaderc::SpvCompilationResult computeClusterClassify;
-    shaderc::SpvCompilationResult computeTriangleSplit;
+    Shader computeClustersCull;
+    Shader computeClusterClassify;
+    Shader computeTriangleSplit;
 
-    shaderc::SpvCompilationResult computeBuildSetup;
+    Shader computeBuildSetup;
   };
 
   struct Pipelines
@@ -101,6 +87,8 @@ bool RendererRasterClustersTess::initShaders(Resources& res, Scene& scene, const
   options.AddMacroDefinition("TESS_USE_PN", fmt::format("{}", config.pnDisplacement ? 1 : 0));
   options.AddMacroDefinition("TESS_USE_1X_TRANSIENTBUILDS", "0");
   options.AddMacroDefinition("TESS_USE_2X_TRANSIENTBUILDS", "0");
+  options.AddMacroDefinition("TESS_USE_1X_COMBINEDTEMPLATES", "0");
+  options.AddMacroDefinition("TESS_USE_2X_COMBINEDTEMPLATES", "0");
   options.AddMacroDefinition("TESS_USE_PERSISTENT_KERNEL", fmt::format("{}", config.persistentKernel ? 1 : 0));
   options.AddMacroDefinition("TESS_MAX_SPLIT_FACTOR",
                              fmt::format("{}", std::max(2u, std::min(config.splitFactor, uint32_t(TESSTABLE_SIZE)))));
@@ -109,11 +97,20 @@ bool RendererRasterClustersTess::initShaders(Resources& res, Scene& scene, const
   options.AddMacroDefinition("MAX_VISIBLE_CLUSTERS", fmt::format("{}", 1 << config.numVisibleClusterBits));
   options.AddMacroDefinition("MAX_SPLIT_TRIANGLES", fmt::format("{}", 1 << config.numSplitTriangleBits));
   options.AddMacroDefinition("MESHSHADER_WORKGROUP_SIZE", "32");
+  options.AddMacroDefinition("USE_EXT_MESH_SHADER", fmt::format("{}", config.useEXTmeshShader ? 1 : 0));
+  // leaves headroom for the overshoot of fit16bitLaunchGrid
+  options.AddMacroDefinition("MESHSHADER_MAX_WORKGROUPS",
+                             fmt::format("{}u", std::min(res.m_meshShaderPropsEXT.maxMeshWorkGroupTotalCount,
+                                                         res.m_meshShaderPropsEXT.maxTaskWorkGroupTotalCount)
+                                                    - 1024));
   options.AddMacroDefinition("HAS_DISPLACEMENT_TEXTURES", fmt::format("{}", scene.m_textureImages.size() ? 1 : 0));
   options.AddMacroDefinition("DO_CULLING", fmt::format("{}", config.doCulling ? 1 : 0));
   options.AddMacroDefinition("DO_ANIMATION", fmt::format("{}", config.doAnimation ? 1 : 0));
   options.AddMacroDefinition("DEBUG_VISUALIZATION", fmt::format("{}", config.debugVisualization ? 1 : 0));
   options.AddMacroDefinition("TESS_GENERATE_HISTOGRAM", fmt::format("{}", config.generateHistogram ? 1 : 0));
+  options.AddMacroDefinition("USE_RENDER_STATS", fmt::format("{}", config.useRenderStats ? 1 : 0));
+  options.AddMacroDefinition("USE_DLSS", fmt::format("{}", config.useDlss ? 1 : 0));
+  options.AddMacroDefinition("USE_DLSS_GUIDE_BUFFERS", "0");
 
   res.compileShader(m_shaders.meshShaderFull, VK_SHADER_STAGE_MESH_BIT_NV, "render_raster_clusters.mesh.glsl", &options);
 
@@ -149,15 +146,23 @@ bool RendererRasterClustersTess::init(Resources& res, Scene& scene, const Render
 {
   m_config = config;
 
+#if USE_DLSS
+  res.setFramebufferDlss(m_config.useDlss ? Resources::DlssMode::eSuperResolution : Resources::DlssMode::eNone, m_config.dlssQuality);
+  // falls back to native rendering if DLSS-SR failed to initialize
+  m_config.useDlss = m_config.useDlss && res.m_frameBuffer.dlssMode == Resources::DlssMode::eSuperResolution;
+#else
+  m_config.useDlss = false;
+#endif
+
   m_tessTable.init(res);
 
-  if(!initShaders(res, scene, config))
+  if(!initShaders(res, scene, m_config))
   {
     m_tessTable.deinit(res);
     return false;
   }
 
-  initBasics(res, scene, config);
+  initBasics(res, scene, m_config);
 
 
   {
@@ -245,10 +250,22 @@ bool RendererRasterClustersTess::init(Resources& res, Scene& scene, const Render
     nvvk::GraphicsPipelineCreator graphicsGen;
     nvvk::GraphicsPipelineState   graphicsState = res.m_basicGraphicsState;
 
-    graphicsGen.pipelineInfo.layout                  = m_pipelineLayout;
+    graphicsGen.pipelineInfo.layout = m_pipelineLayout;
+    graphicsGen.pipelineInfo.flags  = res.getPipelineCreateFlags();
+
     graphicsGen.renderingState.depthAttachmentFormat = res.m_frameBuffer.pipelineRenderingInfo.depthAttachmentFormat;
     graphicsGen.renderingState.stencilAttachmentFormat = res.m_frameBuffer.pipelineRenderingInfo.stencilAttachmentFormat;
     graphicsGen.colorFormats = {res.m_frameBuffer.colorFormat};
+#if USE_DLSS
+    if(m_config.useDlss)
+    {
+      // color and motion vectors
+      graphicsGen.colorFormats = res.m_frameBuffer.dlssUpscaler.getBufferFormats();
+      graphicsState.colorWriteMasks.resize(2, graphicsState.colorWriteMasks[0]);
+      graphicsState.colorBlendEnables.resize(2, graphicsState.colorBlendEnables[0]);
+      graphicsState.colorBlendEquations.resize(2, graphicsState.colorBlendEquations[0]);
+    }
+#endif
 
     graphicsState.rasterizationState.frontFace = config.flipWinding ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
 
@@ -256,6 +273,7 @@ bool RendererRasterClustersTess::init(Resources& res, Scene& scene, const Render
     graphicsGen.addShader(VK_SHADER_STAGE_FRAGMENT_BIT, "main", nvvkglsl::GlslCompiler::getSpirvData(m_shaders.fragmentShader));
 
     graphicsGen.createGraphicsPipeline(res.m_device, nullptr, graphicsState, &m_pipelines.graphicsMeshFull);
+    res.dumpPipelineInternals(m_pipelines.graphicsMeshFull, m_shaders.meshShaderFull);
 
     graphicsGen.clearShaders();
     if(config.rasterBatchMeshlets)
@@ -272,31 +290,26 @@ bool RendererRasterClustersTess::init(Resources& res, Scene& scene, const Render
       graphicsGen.addShader(VK_SHADER_STAGE_FRAGMENT_BIT, "main", nvvkglsl::GlslCompiler::getSpirvData(m_shaders.fragmentShader));
     }
     graphicsGen.createGraphicsPipeline(res.m_device, nullptr, graphicsState, &m_pipelines.graphicsMeshTess);
+    res.dumpPipelineInternals(m_pipelines.graphicsMeshTess,
+                              config.rasterBatchMeshlets ? m_shaders.meshShaderTessBatched : m_shaders.meshShaderTess);
   }
 
   {
     VkComputePipelineCreateInfo compInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    VkShaderModuleCreateInfo    shaderInfo{};
-    compInfo.stage       = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    compInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    compInfo.stage.pNext = &shaderInfo;
-    compInfo.stage.pName = "main";
-    compInfo.layout      = m_pipelineLayout;
+    compInfo.stage                       = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    compInfo.stage.stage                 = VK_SHADER_STAGE_COMPUTE_BIT;
+    compInfo.stage.pName                 = "main";
+    compInfo.layout                      = m_pipelineLayout;
 
-    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeClustersCull);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeClustersCull);
+    res.createComputePipeline(compInfo, m_shaders.computeClustersCull, m_pipelines.computeClustersCull);
 
-    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeTriangleSplit);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeTriangleSplit);
+    res.createComputePipeline(compInfo, m_shaders.computeTriangleSplit, m_pipelines.computeTriangleSplit);
 
-    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeClusterClassify);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeClusterClassify);
+    res.createComputePipeline(compInfo, m_shaders.computeClusterClassify, m_pipelines.computeClusterClassify);
 
-    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeBuildSetup);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeBuildSetup);
+    res.createComputePipeline(compInfo, m_shaders.computeBuildSetup, m_pipelines.computeBuildSetup);
 
-    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeInstancesClassify);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeInstancesClassify);
+    res.createComputePipeline(compInfo, m_shaders.computeInstancesClassify, m_pipelines.computeInstancesClassify);
   }
 
   LOGI("persistent warps %d\n", m_config.persistentThreads / SUBGROUP_SIZE);
@@ -465,7 +478,16 @@ void RendererRasterClustersTess::render(VkCommandBuffer cmd, Resources& res, Sce
 
       VkAttachmentLoadOp op = useSky ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_CLEAR;
 
-      res.cmdBeginRendering(cmd, false, op, op);
+#if USE_DLSS
+      if(m_config.useDlss)
+      {
+        res.cmdBeginRenderingDlssSr(cmd, op, op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+      }
+      else
+#endif
+      {
+        res.cmdBeginRendering(cmd, false, op, op);
+      }
 
       if(useSky)
       {
@@ -476,11 +498,27 @@ void RendererRasterClustersTess::render(VkCommandBuffer cmd, Resources& res, Sce
 
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelines.graphicsMeshTess);
 
-      vkCmdDrawMeshTasksIndirectNV(cmd, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, drawPartTriangles), 1, 0);
+      if(m_config.useEXTmeshShader)
+      {
+        vkCmdDrawMeshTasksIndirectEXT(cmd, m_sceneBuildBuffer.buffer,
+                                      offsetof(shaderio::SceneBuilding, drawPartTrianglesEXT), 1, 0);
+      }
+      else
+      {
+        vkCmdDrawMeshTasksIndirectNV(cmd, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, drawPartTriangles), 1, 0);
+      }
 
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelines.graphicsMeshFull);
 
-      vkCmdDrawMeshTasksIndirectNV(cmd, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, drawFullClusters), 1, 0);
+      if(m_config.useEXTmeshShader)
+      {
+        vkCmdDrawMeshTasksIndirectEXT(cmd, m_sceneBuildBuffer.buffer,
+                                      offsetof(shaderio::SceneBuilding, drawFullClustersEXT), 1, 0);
+      }
+      else
+      {
+        vkCmdDrawMeshTasksIndirectNV(cmd, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, drawFullClusters), 1, 0);
+      }
 
       vkCmdEndRendering(cmd);
     }
@@ -493,6 +531,20 @@ void RendererRasterClustersTess::render(VkCommandBuffer cmd, Resources& res, Sce
       res.cmdBuildHiz(cmd, frame, profiler);
     }
   }
+
+#if USE_DLSS
+  if(m_config.useDlss)
+  {
+    // hbao is applied to the DLSS input
+    if(frame.hbaoActive)
+    {
+      res.cmdHBAO(cmd, frame, profiler);
+    }
+    res.cmdPrepareDlssSrEvaluation(cmd);
+    // on failure the app disables DLSS before the next frame
+    res.cmdEvaluateDlssSr(cmd, frame.frameConstants.jitter, profiler);
+  }
+#endif
 }
 
 void RendererRasterClustersTess::updatedFrameBuffer(Resources& res)

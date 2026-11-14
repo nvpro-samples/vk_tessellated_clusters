@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
 
@@ -47,7 +33,21 @@
 #include "nvhiz_vk.hpp"
 #include "../shaders/shaderio.h"
 
+#if USE_DLSS
+#include "dlss_denoiser.hpp"
+#include "dlss_upscaler.hpp"
+#endif
+
 namespace tessellatedclusters {
+
+struct Shader
+{
+  shaderc::SpvCompilationResult compiled;
+  std::filesystem::path         fileName;
+
+  operator shaderc::SpvCompilationResult&() { return compiled; }
+  operator const shaderc::SpvCompilationResult&() const { return compiled; }
+};
 
 struct FrameConfig
 {
@@ -169,13 +169,34 @@ public:
       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT
       | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
 
+#if USE_DLSS
+  enum class DlssMode
+  {
+    eNone,
+    eRayReconstruction,
+    eSuperResolution,
+  };
+#endif
 
   struct FrameBuffer
   {
-    VkExtent2D renderSize{};
+    static constexpr int MAX_SUPERSAMPLE = 4;
 
-    int  supersample = 0;
-    bool useResolved = false;
+    // the resolution we render at, lowered when DLSS is active
+    VkExtent2D renderSize{};
+    // depends on supersample, the output of DLSS
+    VkExtent2D targetSize{};
+    VkExtent2D windowSize{};
+
+    // 1 to MAX_SUPERSAMPLE: multiple of the window size along width and height
+    // 540, 720, 1080, 1440, 2160: fixed 16:9 resolution with that height
+    // 1024, 2048, 4096: fixed square resolution
+    int  supersample    = 0;
+    bool hbaoQuarterRes = true;
+    bool useResolved    = false;
+    // fixed target resolution, independent of the window: no resolve, the viewport letterboxes it
+    bool  fixedSize  = false;
+    float pixelScale = 1;
 
     VkFormat colorFormat = VK_FORMAT_R8G8B8A8_UNORM;
     VkFormat depthStencilFormat;
@@ -195,14 +216,45 @@ public:
     nvvk::Image imgHizFar = {};
 
     VkPipelineRenderingCreateInfo pipelineRenderingInfo = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+
+#if USE_DLSS
+    DlssMode                    dlssMode           = DlssMode::eNone;
+    DlssDenoiser                dlssDenoiser       = {};
+    DlssUpscaler                dlssUpscaler       = {};
+    NVSDK_NGX_PerfQuality_Value dlssQuality        = NVSDK_NGX_PerfQuality_Value(-1);
+    VkImageLayout               dlssSrColorLayout  = VK_IMAGE_LAYOUT_GENERAL;
+    VkImageLayout               dlssSrMotionLayout = VK_IMAGE_LAYOUT_GENERAL;
+#endif
   };
 
 
   void init(VkDevice device, VkPhysicalDevice physicalDevice, VkInstance instance, nvvk::QueueInfo queue);
   void deinit();
 
-  bool initFramebuffer(const VkExtent2D& windowSize, int supersample, bool hbaoFullRes);
+  bool initFramebuffer(const VkExtent2D& windowSize, int supersample, bool hbaoQuarterRes);
   void deinitFramebuffer();
+
+  glm::vec2 getFramebufferWindow2RenderScale() const
+  {
+    return glm::vec2(m_frameBuffer.renderSize.width, m_frameBuffer.renderSize.height)
+           / glm::vec2(m_frameBuffer.windowSize.width, m_frameBuffer.windowSize.height);
+  }
+#if USE_DLSS
+  // re-creates the framebuffer if mode or quality changed, falls back to `eNone` if DLSS fails to initialize
+  // or, without `m_dlssWaitForInit`, while its NGX init is still running
+  void setFramebufferDlss(DlssMode mode, NVSDK_NGX_PerfQuality_Value dlssQuality);
+  void updateFramebufferDlss(VkCommandBuffer cmd);
+
+  // NGX init and first feature creation take several seconds, they run on a worker thread
+  void initDlssAsync(DlssMode mode, NVSDK_NGX_PerfQuality_Value dlssQuality);
+  bool isDlssLoading() const;
+  // returns true once after an async init finished
+  bool pollDlssInit();
+
+  bool m_dlssWaitForInit = true;
+  // set when an evaluation failed, the app then disables DLSS at the next safe point
+  bool m_dlssEvaluateFailed = false;
+#endif
 
   void beginFrame(uint32_t cycleIndex);
   void postProcessFrame(VkCommandBuffer cmd, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler);
@@ -221,16 +273,38 @@ public:
   bool compileShader(shaderc::SpvCompilationResult& compiled,
                      VkShaderStageFlagBits          shader,
                      const std::filesystem::path&   filePath,
-                     shaderc::CompileOptions*       options = nullptr);
+                     shaderc::CompileOptions*       options      = nullptr,
+                     const std::filesystem::path&   dumpFileName = {});
+
+  // `variant` must be provided when the same file is compiled more than once (different defines),
+  // it keeps the shader's file name, and therefore the dumped files, unique
+  bool compileShader(Shader&                      shader,
+                     VkShaderStageFlagBits        shaderStage,
+                     const std::filesystem::path& filePath,
+                     shaderc::CompileOptions*     options = nullptr,
+                     const char*                  variant = nullptr);
+
+  // flags all pipelines must be created with, so that `dumpPipelineInternals` can work
+  VkPipelineCreateFlags getPipelineCreateFlags() const
+  {
+    return m_dumpInternal ? VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR : 0;
+  }
+
+  // dumps the driver's internal representation (isa etc.) into the working directory,
+  // named after the shader's file. does nothing unless `m_dumpInternal` is active.
+  void dumpPipelineInternals(VkPipeline pipeline, const Shader& shader);
+
+  // sets up compInfo's stage.pNext and flags, and dumps the pipeline internals if enabled
+  void createComputePipeline(VkComputePipelineCreateInfo& compInfo, const Shader& shader, VkPipeline& pipeline);
 
   // tests if all shaders compiled well, returns false if not
   // also destroys all shaders if not all were successful.
-  bool verifyShaders(size_t numShaders, shaderc::SpvCompilationResult* shaders)
+  bool verifyShaders(size_t numShaders, const Shader* shaders)
   {
     for(size_t i = 0; i < numShaders; i++)
     {
-      if(shaders[i].GetCompilationStatus() != shaderc_compilation_status_null_result_object
-         && shaders[i].GetCompilationStatus() != shaderc_compilation_status_success)
+      if(shaders[i].compiled.GetCompilationStatus() != shaderc_compilation_status_null_result_object
+         && shaders[i].compiled.GetCompilationStatus() != shaderc_compilation_status_success)
         return false;
     }
 
@@ -239,7 +313,7 @@ public:
   template <typename T>
   bool verifyShaders(T& container)
   {
-    return verifyShaders(sizeof(T) / sizeof(shaderc::SpvCompilationResult), (shaderc::SpvCompilationResult*)&container);
+    return verifyShaders(sizeof(T) / sizeof(Shader), (const Shader*)&container);
   }
 
   void destroyPipelines(size_t numPipelines, VkPipeline* pipelines)
@@ -267,6 +341,15 @@ public:
                          bool               hasSecondary = false,
                          VkAttachmentLoadOp loadOpColor  = VK_ATTACHMENT_LOAD_OP_CLEAR,
                          VkAttachmentLoadOp loadOpDepth  = VK_ATTACHMENT_LOAD_OP_CLEAR);
+#if USE_DLSS
+  // renders into the DLSS-SR input color and motion vectors
+  void cmdBeginRenderingDlssSr(VkCommandBuffer    cmd,
+                               VkAttachmentLoadOp loadOpColor  = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                               VkAttachmentLoadOp loadOpDepth  = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                               VkAttachmentLoadOp loadOpMotion = VK_ATTACHMENT_LOAD_OP_CLEAR);
+  void cmdPrepareDlssSrEvaluation(VkCommandBuffer cmd);
+  bool cmdEvaluateDlssSr(VkCommandBuffer cmd, glm::vec2 jitter, nvvk::ProfilerGpuTimer& profiler);
+#endif
   void cmdBeginRayTracing(VkCommandBuffer cmd);
 
   void cmdImageTransition(VkCommandBuffer cmd, nvvk::Image& rimg, VkImageAspectFlags aspects, VkImageLayout newLayout, bool needBarrier = false) const;
@@ -399,9 +482,13 @@ public:
   size_t                      m_fboChangeID        = ~0;
   glm::vec4                   m_bgColor            = {0.1, 0.13, 0.15, 1.0};
 
-  bool m_supportsClusters = false;
-  bool m_dumpSpirv        = false;
-  bool m_hbaoFullRes      = false;
+  VkPhysicalDeviceMeshShaderPropertiesEXT m_meshShaderPropsEXT = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT};
+
+  bool m_supportsClusters               = false;
+  bool m_supportsMeshShaderNV           = false;
+  bool m_supportsPipelineExecutableInfo = false;
+  bool m_dumpSpirv                      = false;
+  bool m_dumpInternal                   = false;
 
   HbaoPass        m_hbaoPass;
   HbaoPass::Frame m_hbaoFrame;

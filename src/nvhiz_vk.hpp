@@ -1,19 +1,5 @@
 /*
- * Copyright (c) 2022-2025, NVIDIA CORPORATION.  All rights reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -72,11 +58,15 @@ public:
 
     // the system may use only a sub-rectangle of the allocated width/height
     // you should clamp access to this, when sampling the texture
+    // rounded up, so odd source sizes keep their last texel
     uint32_t usedWidth;
     uint32_t usedHeight;
+    // unrounded size in texels, maps normalized screen coordinates to the texture
+    float exactWidth;
+    float exactHeight;
 
-    // xy scale and zw clamp
-    // use min(uv*factor.xy,factor.zw) for lookups
+    // xy scale and zw clamp (both the exact screen extent)
+    // use clamp(uv*factor.xy,0,factor.zw) for lookups
     void  getShaderFactors(float factors[4]) const;
     float getSizeMax() const;
   };

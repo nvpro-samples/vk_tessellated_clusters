@@ -1,0 +1,33 @@
+# Options that select shader permutations or major code paths, in both renderers.
+# Each sequence changes one option on top of the previous one, then it is restored.
+
+SEQUENCE "raster_base"            --sequenceframes 8 --sequenceresetframes 2 --renderer 0 --animation 1 --culling 1
+SEQUENCE "raster_no_pn"           --pndisplacement 0
+SEQUENCE "raster_pn"              --pndisplacement 1
+SEQUENCE "raster_persistent"      --persistentkernel 1 --persistentthreads 4096
+SEQUENCE "raster_persistent_off"  --persistentkernel 0
+SEQUENCE "raster_flip"            --flipwinding 1
+SEQUENCE "raster_unflip"          --flipwinding 0
+SEQUENCE "raster_no_hbao"         --hbao 0
+SEQUENCE "raster_hbao_radius"     --hbao 1 --hbaoradius 0.2
+SEQUENCE "raster_facet_off"       --tessrate 0 --facetshading 0
+SEQUENCE "raster_facet_on"        --facetshading 1 --tessrate 4
+SEQUENCE "raster_visibleclusters" --visibleclusterbits 18
+SEQUENCE "raster_stats"           --visibleclusterbits 20 --renderstats 1
+SEQUENCE "raster_stats_off"       --renderstats 0
+
+SEQUENCE "rt_base"                --renderer 1 --lowtessmode 1
+SEQUENCE "rt_no_pn"               --pndisplacement 0
+SEQUENCE "rt_pn"                  --pndisplacement 1
+SEQUENCE "rt_persistent"          --persistentkernel 1 --persistentthreads 4096
+SEQUENCE "rt_persistent_off"      --persistentkernel 0
+SEQUENCE "rt_flip"                --flipwinding 1
+SEQUENCE "rt_unflip"              --flipwinding 0
+SEQUENCE "rt_fast_build"          --clusterbuildmode 1
+SEQUENCE "rt_fast_trace"          --clusterbuildmode 2
+SEQUENCE "rt_default_build"       --clusterbuildmode 0
+SEQUENCE "rt_truncate"            --truncatebits 8
+SEQUENCE "rt_truncate_transient"  --lowtessmode 0
+SEQUENCE "rt_truncate_off"        --truncatebits 0 --lowtessmode 1
+SEQUENCE "rt_visibleclusters"     --visibleclusterbits 18
+SEQUENCE "rt_stats"               --visibleclusterbits 20 --renderstats 1

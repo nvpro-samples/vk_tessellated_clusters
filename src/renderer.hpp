@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
 
@@ -32,6 +18,17 @@
 #include "scene.hpp"
 
 namespace tessellatedclusters {
+
+// How the ray tracing renderer handles clusters with low tessellation factors.
+// The two modes are mutually exclusive.
+enum LowTessMode : uint32_t
+{
+  // build a transient CLAS from scratch for them
+  LOWTESS_MODE_TRANSIENT_BUILDS = 0,
+  // instantiate pre-built templates that combine multiple of them
+  LOWTESS_MODE_COMBINED_TEMPLATES = 1,
+};
+
 struct RendererConfig
 {
   // scene related
@@ -39,24 +36,44 @@ struct RendererConfig
   uint32_t  gridConfig     = 3;
   glm::vec3 refShift       = glm::vec3(1, 1, 1);
 
-  bool debugVisualization  = true;
-  bool doAnimation         = false;
-  bool doCulling           = false;
-  bool flipWinding         = false;
-  bool pnDisplacement      = true;
-  bool transientClusters1X = true;
-  bool transientClusters2X = true;
-  bool generateHistogram   = false;
+  bool debugVisualization = true;
+  bool doAnimation        = false;
+  bool doCulling          = false;
+  bool flipWinding        = false;
+  bool pnDisplacement     = true;
+  // optimize clusters where all triangles have a tessellation factor of 1x1x1
+  bool lowTessClusters1X = true;
+  // optimize triangles whose tessellation factors are all <= 2
+  bool lowTessClusters2X = true;
+  // which mechanism is used for the two options above
+  LowTessMode lowTessMode = LOWTESS_MODE_COMBINED_TEMPLATES;
+  // number of 2x2x2 patches a transient cluster build batches at most
+  uint32_t transient2xBatchSize = 32;
+  // number of independent triangles / 2x2x2 patches a combined template stores at most
+  uint32_t combined1xBatchSize = 64;
+  uint32_t combined2xBatchSize = 16;
+  bool     generateHistogram   = false;
+  // extra atomic counters for statistics, costs performance
+  bool useRenderStats = false;
 
   bool rasterBatchMeshlets = true;
+  bool useEXTmeshShader    = false;
   bool persistentKernel    = false;
+
+  // super resolution in rasterization and ray reconstruction in ray tracing
+  bool useDlss = true;
+#if USE_DLSS
+  NVSDK_NGX_PerfQuality_Value dlssQuality = NVSDK_NGX_PerfQuality_Value_MaxQuality;
+#else
+  int dlssQuality = 0;
+#endif
 
   uint32_t positionTruncateBits     = 0;
   uint32_t numVisibleClusterBits    = 20;
   uint32_t numSplitTriangleBits     = 16;
   uint32_t numPartTriangleBits      = 20;
   uint32_t numGeneratedVerticesBits = 24;
-  size_t   numGeneratedClusterMegs  = 1024;
+  uint32_t numGeneratedClusterMegs  = 1024;
 
   uint32_t persistentThreads = 0;
   uint32_t splitFactor       = 8;
@@ -66,6 +83,15 @@ struct RendererConfig
   VkBuildAccelerationStructureFlagsKHR templateInstantiateFlags = 0;
   VkBuildAccelerationStructureFlagsKHR templateBuildFlags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
   float                                templateBBoxBloat  = 0.1f;
+
+  bool useLowTessOptimization() const { return lowTessClusters1X || lowTessClusters2X; }
+  bool useTransientBuilds() const { return useLowTessOptimization() && lowTessMode == LOWTESS_MODE_TRANSIENT_BUILDS; }
+  bool useCombinedTemplates() const
+  {
+    return useLowTessOptimization() && lowTessMode == LOWTESS_MODE_COMBINED_TEMPLATES;
+  }
+  // both store their per-CLAS information at the back of the `partTriangles` array
+  bool useLowtessParts() const { return useTransientBuilds() || useCombinedTemplates(); }
 };
 
 class Renderer
@@ -127,9 +153,9 @@ protected:
 
   struct BasicShaders
   {
-    shaderc::SpvCompilationResult fullScreenVertexShader;
-    shaderc::SpvCompilationResult fullscreenWriteDepthFragShader;
-    shaderc::SpvCompilationResult fullscreenBackgroundFragShader;
+    Shader fullScreenVertexShader;
+    Shader fullscreenWriteDepthFragShader;
+    Shader fullscreenBackgroundFragShader;
   };
 
   struct BasicPipelines

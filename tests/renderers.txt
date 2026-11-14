@@ -1,0 +1,9 @@
+# Rasterization and ray tracing share the scene and the base classification kernel,
+# switch back and forth to also cover the renderer re-initialization.
+
+SEQUENCE "raster"           --sequenceframes 8 --sequenceresetframes 2 --renderer 0
+SEQUENCE "raytrace"         --renderer 1 --lowtessmode 1
+SEQUENCE "raster_animated"  --renderer 0 --animation 1 --culling 1
+SEQUENCE "raytrace_animated" --renderer 1
+SEQUENCE "raytrace_culled"  --animation 0 --culling 1
+SEQUENCE "raster_again"     --renderer 0 --culling 0

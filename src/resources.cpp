@@ -1,27 +1,14 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include <nvutils/file_operations.hpp>
 #include <nvutils/logger.hpp>
 #include <nvutils/spirv.hpp>
 #include <nvvk/barriers.hpp>
 #include <nvvk/formats.hpp>
+#include <nvvk/pipeline.hpp>
 
 #include "resources.hpp"
 
@@ -37,13 +24,15 @@ void Resources::postProcessFrame(VkCommandBuffer cmd, const FrameConfig& frame, 
   auto sec = profiler.cmdFrameSection(cmd, "Post-process");
 
   bool doHbao = frame.hbaoActive;
+#if USE_DLSS
+  // DLSS-SR requires hbao to be applied to its input, hence the renderer does it prior upscaling
+  doHbao = doHbao && m_frameBuffer.dlssMode != DlssMode::eSuperResolution;
+#endif
 
   // do hbao on the full-res input image
-  if(frame.hbaoActive && (m_hbaoFullRes || !m_frameBuffer.useResolved))
+  if(doHbao)
   {
     cmdHBAO(cmd, frame, profiler);
-
-    doHbao = false;
   }
 
   if(m_frameBuffer.useResolved)
@@ -53,8 +42,8 @@ void Resources::postProcessFrame(VkCommandBuffer cmd, const FrameConfig& frame, 
     region.dstOffsets[1].x           = frame.windowSize.width;
     region.dstOffsets[1].y           = frame.windowSize.height;
     region.dstOffsets[1].z           = 1;
-    region.srcOffsets[1].x           = m_frameBuffer.renderSize.width;
-    region.srcOffsets[1].y           = m_frameBuffer.renderSize.height;
+    region.srcOffsets[1].x           = m_frameBuffer.targetSize.width;
+    region.srcOffsets[1].y           = m_frameBuffer.targetSize.height;
     region.srcOffsets[1].z           = 1;
     region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.dstSubresource.layerCount = 1;
@@ -66,11 +55,6 @@ void Resources::postProcessFrame(VkCommandBuffer cmd, const FrameConfig& frame, 
 
     vkCmdBlitImage(cmd, m_frameBuffer.imgColor.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    m_frameBuffer.imgColorResolved.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_LINEAR);
-
-    if(doHbao)
-    {
-      cmdHBAO(cmd, frame, profiler);
-    }
 
     cmdImageTransition(cmd, m_frameBuffer.imgColorResolved, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
   }
@@ -108,6 +92,17 @@ void Resources::init(VkDevice device, VkPhysicalDevice physicalDevice, VkInstanc
   m_queue          = queue;
 
   m_physicalDeviceInfo.init(physicalDevice);
+
+  m_dumpInternal = m_dumpInternal && m_supportsPipelineExecutableInfo;
+
+  // reversed-Z
+  m_basicGraphicsState.depthStencilState.depthCompareOp = VK_COMPARE_OP_GREATER;
+
+  {
+    VkPhysicalDeviceProperties2 props2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    props2.pNext                       = &m_meshShaderPropsEXT;
+    vkGetPhysicalDeviceProperties2(physicalDevice, &props2);
+  }
 
   {
     VmaAllocatorCreateInfo allocatorInfo = {
@@ -174,11 +169,34 @@ void Resources::init(VkDevice device, VkPhysicalDevice physicalDevice, VkInstanc
 
     m_hbaoPass.init(&m_allocator, &m_samplerPool, &m_glslCompiler, config);
   }
+#if USE_DLSS
+  {
+    DlssDenoiser::InitInfo info;
+    info.resourceAllocator = &m_allocator;
+    info.queueFamilyIndex  = m_queue.familyIndex;
+    info.queue             = m_queue.queue;
+    info.samplerPool       = &m_samplerPool;
+    info.instance          = instance;
+
+    // NGX itself is initialized on first use, it takes several seconds
+    m_frameBuffer.dlssDenoiser.init(info);
+  }
+  {
+    DlssUpscaler::InitInfo info;
+    info.resourceAllocator = &m_allocator;
+    info.queueFamilyIndex  = m_queue.familyIndex;
+    info.queue             = m_queue.queue;
+    info.samplerPool       = &m_samplerPool;
+    info.instance          = instance;
+
+    m_frameBuffer.dlssUpscaler.init(info);
+  }
+#endif
 
   {
     NVHizVK::Config config;
     config.msaaSamples             = 0;
-    config.reversedZ               = false;
+    config.reversedZ               = true;
     config.supportsMinmaxFilter    = true;
     config.supportsSubGroupShuffle = true;
     m_hiz.init(m_device, config, 1);
@@ -207,6 +225,10 @@ void Resources::deinit()
   deinitFramebuffer();
   m_hbaoPass.deinit();
   m_hiz.deinit();
+#if USE_DLSS
+  m_frameBuffer.dlssDenoiser.deinit();
+  m_frameBuffer.dlssUpscaler.deinit();
+#endif
 
   m_samplerPool.releaseSampler(m_samplerLinear);
   m_samplerPool.deinit();
@@ -214,8 +236,27 @@ void Resources::deinit()
   m_allocator.deinit();
 }
 
-bool Resources::initFramebuffer(const VkExtent2D& windowSize, int supersample, bool hbaoFullRes)
+bool Resources::initFramebuffer(const VkExtent2D& windowSize, int supersample, bool hbaoQuarterRes)
 {
+  // only the HBAO resolution changed, its images are the only thing that follows it
+  if(m_frameBuffer.imgColor.image != 0 && windowSize.width == m_frameBuffer.windowSize.width
+     && windowSize.height == m_frameBuffer.windowSize.height && supersample == m_frameBuffer.supersample
+     && hbaoQuarterRes != m_frameBuffer.hbaoQuarterRes)
+  {
+    m_frameBuffer.hbaoQuarterRes = hbaoQuarterRes;
+    if(m_hbaoFrame.slot != ~0u)
+    {
+      NVVK_CHECK(vkDeviceWaitIdle(m_device));
+      HbaoPass::FrameConfig config = m_hbaoFrame.config;
+      config.quarterRes            = hbaoQuarterRes;
+
+      VkCommandBuffer cmd = createTempCmdBuffer();
+      m_hbaoPass.initFrame(m_hbaoFrame, config, cmd);
+      tempSyncSubmit(cmd);
+    }
+    return true;
+  }
+
   m_fboChangeID++;
 
   if(m_frameBuffer.imgColor.image != 0)
@@ -223,18 +264,66 @@ bool Resources::initFramebuffer(const VkExtent2D& windowSize, int supersample, b
     deinitFramebuffer();
   }
 
-  m_basicGraphicsState.rasterizationState.lineWidth = float(supersample);
+  // the line width is relative to this size
+  VkExtent2D referenceSize = windowSize;
+  bool       fixedSize     = true;  // all but the default case
 
-  bool oldResolved = m_frameBuffer.supersample > 1;
+  switch(supersample)
+  {
+    case 540:
+      m_frameBuffer.targetSize = {960, 540};
+      referenceSize            = m_frameBuffer.targetSize;
+      break;
+    case 720:
+      m_frameBuffer.targetSize = {1280, 720};
+      referenceSize            = m_frameBuffer.targetSize;
+      break;
+    case 1080:
+      m_frameBuffer.targetSize = {1920, 1080};
+      referenceSize            = m_frameBuffer.targetSize;
+      break;
+    case 1440:
+      m_frameBuffer.targetSize = {2560, 1440};
+      referenceSize            = m_frameBuffer.targetSize;
+      break;
+    case 2160:
+      m_frameBuffer.targetSize = {3840, 2160};
+      referenceSize            = m_frameBuffer.targetSize;
+      break;
+    case 1024:
+      m_frameBuffer.targetSize = {1024, 1024};
+      referenceSize            = m_frameBuffer.targetSize;
+      break;
+    case 2048:
+      m_frameBuffer.targetSize = {2048, 2048};
+      referenceSize            = m_frameBuffer.targetSize;
+      break;
+    case 4096:
+      m_frameBuffer.targetSize = {4096, 4096};
+      referenceSize            = m_frameBuffer.targetSize;
+      break;
+    default:
+      fixedSize                = false;
+      supersample              = std::clamp(supersample, 1, FrameBuffer::MAX_SUPERSAMPLE);
+      m_frameBuffer.targetSize = {windowSize.width * supersample, windowSize.height * supersample};
+      break;
+  }
 
-  m_frameBuffer.renderSize.width  = windowSize.width * supersample;
-  m_frameBuffer.renderSize.height = windowSize.height * supersample;
-  m_frameBuffer.supersample       = supersample;
-  m_hbaoFullRes                   = hbaoFullRes;
+  m_frameBuffer.pixelScale = std::max(float(m_frameBuffer.targetSize.width) / float(referenceSize.width),
+                                      float(m_frameBuffer.targetSize.height) / float(referenceSize.height));
+  m_basicGraphicsState.rasterizationState.lineWidth = m_frameBuffer.pixelScale;
 
-  LOGI("framebuffer: %d x %d\n", m_frameBuffer.renderSize.width, m_frameBuffer.renderSize.height);
+  m_frameBuffer.windowSize     = windowSize;
+  m_frameBuffer.supersample    = supersample;
+  m_frameBuffer.hbaoQuarterRes = hbaoQuarterRes;
+  m_frameBuffer.fixedSize      = fixedSize;
 
-  m_frameBuffer.useResolved = supersample > 1;
+  // may be lowered due to DLSS
+  m_frameBuffer.renderSize = m_frameBuffer.targetSize;
+
+  // fixed resolutions are displayed and saved as is, the window downscale is left to the viewport
+  m_frameBuffer.useResolved =
+      !fixedSize && (m_frameBuffer.targetSize.width != windowSize.width || m_frameBuffer.targetSize.height != windowSize.height);
 
   VkSampleCountFlagBits samplesUsed = VK_SAMPLE_COUNT_1_BIT;
   {
@@ -242,8 +331,8 @@ bool Resources::initFramebuffer(const VkExtent2D& windowSize, int supersample, b
     VkImageCreateInfo cbImageInfo = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     cbImageInfo.imageType         = VK_IMAGE_TYPE_2D;
     cbImageInfo.format            = m_frameBuffer.colorFormat;
-    cbImageInfo.extent.width      = m_frameBuffer.renderSize.width;
-    cbImageInfo.extent.height     = m_frameBuffer.renderSize.height;
+    cbImageInfo.extent.width      = m_frameBuffer.targetSize.width;
+    cbImageInfo.extent.height     = m_frameBuffer.targetSize.height;
     cbImageInfo.extent.depth      = 1;
     cbImageInfo.mipLevels         = 1;
     cbImageInfo.arrayLayers       = 1;
@@ -272,6 +361,19 @@ bool Resources::initFramebuffer(const VkExtent2D& windowSize, int supersample, b
     NVVK_DBG_NAME(m_frameBuffer.imgColor.image);
     NVVK_DBG_NAME(m_frameBuffer.imgColor.descriptor.imageView);
   }
+
+  VkCommandBuffer cmd = createTempCmdBuffer();
+
+#if USE_DLSS
+  if(m_frameBuffer.dlssMode != DlssMode::eNone)
+  {
+    updateFramebufferDlss(cmd);
+  }
+#endif
+
+  LOGI("framebuffer: %4d x %4d (window)\n", m_frameBuffer.windowSize.width, m_frameBuffer.windowSize.height);
+  LOGI("             %4d x %4d (target)\n", m_frameBuffer.targetSize.width, m_frameBuffer.targetSize.height);
+  LOGI("             %4d x %4d (render)\n", m_frameBuffer.renderSize.width, m_frameBuffer.renderSize.height);
 
   // depth stencil
   m_frameBuffer.depthStencilFormat = nvvk::findDepthStencilFormat(m_physicalDevice);
@@ -313,6 +415,14 @@ bool Resources::initFramebuffer(const VkExtent2D& windowSize, int supersample, b
     dsImageViewInfo.image                       = m_frameBuffer.imgDepthStencil.image;
 
     NVVK_CHECK(vkCreateImageView(m_device, &dsImageViewInfo, nullptr, &m_frameBuffer.viewDepth));
+
+#if USE_DLSS
+    if(m_frameBuffer.dlssMode == DlssMode::eSuperResolution)
+    {
+      m_frameBuffer.dlssUpscaler.setDepthResource(m_frameBuffer.imgDepthStencil.image, m_frameBuffer.viewDepth,
+                                                  m_frameBuffer.depthStencilFormat);
+    }
+#endif
   }
 
   if(m_frameBuffer.useResolved)
@@ -386,6 +496,16 @@ bool Resources::initFramebuffer(const VkExtent2D& windowSize, int supersample, b
     NVVK_CHECK(m_allocator.createImage(m_frameBuffer.imgRaytracingDepth, imageInfo, imageViewInfo));
     NVVK_DBG_NAME(m_frameBuffer.imgRaytracingDepth.image);
     NVVK_DBG_NAME(m_frameBuffer.imgRaytracingDepth.descriptor.imageView);
+
+#if USE_DLSS
+    if(m_frameBuffer.dlssMode == DlssMode::eRayReconstruction)
+    {
+      m_frameBuffer.dlssDenoiser.setResource(DlssRayReconstruction::ResourceType::eDepth,
+                                             m_frameBuffer.imgRaytracingDepth.image,
+                                             m_frameBuffer.imgRaytracingDepth.descriptor.imageView,
+                                             m_frameBuffer.imgRaytracingDepth.format);
+    }
+#endif
   }
 
   {
@@ -403,9 +523,9 @@ bool Resources::initFramebuffer(const VkExtent2D& windowSize, int supersample, b
     hizImageInfo.arrayLayers       = 1;
     hizImageInfo.samples           = VK_SAMPLE_COUNT_1_BIT;
     hizImageInfo.tiling            = VK_IMAGE_TILING_OPTIMAL;
-    hizImageInfo.usage             = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
-    hizImageInfo.flags             = 0;
-    hizImageInfo.initialLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
+    hizImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    hizImageInfo.flags = 0;
+    hizImageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     NVVK_CHECK(m_allocator.createImage(m_frameBuffer.imgHizFar, hizImageInfo));
     NVVK_DBG_NAME(m_frameBuffer.imgHizFar.image);
@@ -420,27 +540,36 @@ bool Resources::initFramebuffer(const VkExtent2D& windowSize, int supersample, b
 
   // initial resource transitions
   {
-    VkCommandBuffer cmd = createTempCmdBuffer();
     {
       HbaoPass::FrameConfig config;
-      config.blend                   = true;
-      config.sourceHeightScale       = m_hbaoFullRes ? 1 : supersample;
-      config.sourceWidthScale        = m_hbaoFullRes ? 1 : supersample;
-      config.targetWidth             = m_hbaoFullRes ? m_frameBuffer.renderSize.width : windowSize.width;
-      config.targetHeight            = m_hbaoFullRes ? m_frameBuffer.renderSize.height : windowSize.height;
+      config.targetWidth             = m_frameBuffer.renderSize.width;
+      config.targetHeight            = m_frameBuffer.renderSize.height;
+      config.quarterRes              = m_frameBuffer.hbaoQuarterRes;
       config.sourceDepth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
       config.sourceDepth.imageView   = m_frameBuffer.viewDepth;
       config.sourceDepth.sampler     = VK_NULL_HANDLE;
       config.targetColor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-      config.targetColor.imageView   = m_frameBuffer.useResolved && !m_hbaoFullRes ?
-                                           m_frameBuffer.imgColorResolved.descriptor.imageView :
-                                           m_frameBuffer.imgColor.descriptor.imageView;
+      config.targetColor.imageView   = m_frameBuffer.imgColor.descriptor.imageView;
       config.targetColor.sampler     = VK_NULL_HANDLE;
+#if USE_DLSS
+      if(m_frameBuffer.dlssMode == DlssMode::eSuperResolution)
+      {
+        // applied to the DLSS input prior upscaling
+        config.targetColor.imageView = m_frameBuffer.dlssUpscaler.getGBuffer().getColorImageView(DlssUpscaler::eDlssInputColor);
+      }
+#endif
 
       m_hbaoPass.initFrame(m_hbaoFrame, config, cmd);
     }
 
     cmdImageTransition(cmd, m_frameBuffer.imgHizFar, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+
+    {
+      // far plane, nothing is occluded before the first frame wrote the hiz
+      VkClearColorValue clear = {};
+      VkImageSubresourceRange subResourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+      vkCmdClearColorImage(cmd, m_frameBuffer.imgHizFar.image, VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &subResourceRange);
+    }
     cmdImageTransition(cmd, m_frameBuffer.imgRaytracingDepth, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
 
     tempSyncSubmit(cmd);
@@ -494,6 +623,120 @@ void Resources::deinitFramebuffer()
   m_hbaoPass.deinitFrame(m_hbaoFrame);
 }
 
+#if USE_DLSS
+void Resources::updateFramebufferDlss(VkCommandBuffer cmd)
+{
+  switch(m_frameBuffer.dlssMode)
+  {
+    case DlssMode::eRayReconstruction: {
+      VkExtent2D renderSize = m_frameBuffer.dlssDenoiser.updateSize(cmd, m_frameBuffer.targetSize, m_frameBuffer.dlssQuality);
+
+      if(!m_frameBuffer.dlssDenoiser.isActive())
+      {
+        LOGW("DLSS-RR initialization failed; falling back to native rendering.\n");
+        m_frameBuffer.dlssDenoiser.deinitResources();
+        m_frameBuffer.dlssMode = DlssMode::eNone;
+        break;
+      }
+
+      m_frameBuffer.dlssDenoiser.setResource(DlssRayReconstruction::ResourceType::eColorOut, m_frameBuffer.imgColor.image,
+                                             m_frameBuffer.imgColor.descriptor.imageView, m_frameBuffer.imgColor.format);
+
+      m_frameBuffer.renderSize = renderSize;
+      break;
+    }
+    case DlssMode::eSuperResolution: {
+      VkExtent2D renderSize = m_frameBuffer.dlssUpscaler.updateSize(cmd, m_frameBuffer.targetSize, m_frameBuffer.dlssQuality);
+
+      if(!m_frameBuffer.dlssUpscaler.isActive())
+      {
+        LOGW("DLSS-SR initialization failed; falling back to native rendering.\n");
+        m_frameBuffer.dlssUpscaler.deinitResources();
+        m_frameBuffer.dlssMode = DlssMode::eNone;
+        break;
+      }
+
+      m_frameBuffer.dlssUpscaler.setOutputResource(m_frameBuffer.imgColor.image, m_frameBuffer.imgColor.descriptor.imageView,
+                                                   m_frameBuffer.imgColor.format);
+      m_frameBuffer.dlssSrColorLayout  = VK_IMAGE_LAYOUT_GENERAL;
+      m_frameBuffer.dlssSrMotionLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+      m_frameBuffer.renderSize = renderSize;
+      break;
+    }
+    case DlssMode::eNone:
+    default:
+      break;
+  }
+}
+
+void Resources::initDlssAsync(DlssMode mode, NVSDK_NGX_PerfQuality_Value dlssQuality)
+{
+  // one at a time, the other is started once this one is polled
+  if(isDlssLoading())
+    return;
+
+  if(mode == DlssMode::eRayReconstruction)
+  {
+    m_frameBuffer.dlssDenoiser.initAsync();
+  }
+  else if(mode == DlssMode::eSuperResolution)
+  {
+    m_frameBuffer.dlssUpscaler.initAsync(dlssQuality);
+  }
+}
+
+bool Resources::isDlssLoading() const
+{
+  return m_frameBuffer.dlssDenoiser.isInitPending() || m_frameBuffer.dlssUpscaler.isInitPending();
+}
+
+bool Resources::pollDlssInit()
+{
+  bool finished = m_frameBuffer.dlssDenoiser.pollInit();
+  finished      = m_frameBuffer.dlssUpscaler.pollInit() || finished;
+  return finished;
+}
+
+void Resources::setFramebufferDlss(DlssMode mode, NVSDK_NGX_PerfQuality_Value dlssQuality)
+{
+  if(!m_dlssWaitForInit
+     && ((mode == DlssMode::eRayReconstruction && !m_frameBuffer.dlssDenoiser.isInitialized())
+         || (mode == DlssMode::eSuperResolution && !m_frameBuffer.dlssUpscaler.isInitialized())))
+  {
+    // render natively until the init is done
+    initDlssAsync(mode, dlssQuality);
+    mode = DlssMode::eNone;
+  }
+
+  if(m_frameBuffer.dlssMode != mode || m_frameBuffer.dlssQuality != dlssQuality)
+  {
+    m_frameBuffer.dlssMode    = mode;
+    m_frameBuffer.dlssQuality = dlssQuality;
+
+    if(mode == DlssMode::eRayReconstruction)
+    {
+      m_frameBuffer.dlssDenoiser.ensureInitialized();
+    }
+    else if(mode == DlssMode::eSuperResolution)
+    {
+      m_frameBuffer.dlssUpscaler.ensureInitialized(dlssQuality);
+    }
+
+    if(mode != DlssMode::eRayReconstruction)
+    {
+      m_frameBuffer.dlssDenoiser.deinitResources();
+    }
+    if(mode != DlssMode::eSuperResolution)
+    {
+      m_frameBuffer.dlssUpscaler.deinitResources();
+    }
+
+    initFramebuffer(m_frameBuffer.windowSize, m_frameBuffer.supersample, m_frameBuffer.hbaoQuarterRes);
+  }
+}
+#endif
+
 void Resources::getReadbackData(shaderio::Readback& readback)
 {
   const shaderio::Readback* pReadback = m_commonBuffers.readBackHost.data();
@@ -511,27 +754,56 @@ void Resources::cmdBuildHiz(VkCommandBuffer cmd, const FrameConfig& frame, nvvk:
   m_hiz.cmdUpdateHiz(cmd, m_hizUpdate, (uint32_t)0);
 }
 
+#if USE_DLSS
+static void cmdTransitionImageLayout(VkCommandBuffer cmd, VkImage image, VkImageLayout& currentLayout, VkImageLayout newLayout, VkImageAspectFlags aspects)
+{
+  if(currentLayout == newLayout)
+    return;
+
+  nvvk::ImageMemoryBarrierParams imageBarrier;
+  imageBarrier.image                       = image;
+  imageBarrier.oldLayout                   = currentLayout;
+  imageBarrier.newLayout                   = newLayout;
+  imageBarrier.subresourceRange.aspectMask = aspects;
+
+  nvvk::cmdImageMemoryBarrier(cmd, imageBarrier);
+
+  currentLayout = newLayout;
+}
+#endif
+
 void Resources::cmdHBAO(VkCommandBuffer cmd, const FrameConfig& frame, nvvk::ProfilerGpuTimer& profiler)
 {
   auto timerSection = profiler.cmdFrameSection(cmd, "HBAO");
 
-  bool useResolved = m_frameBuffer.useResolved && !m_hbaoFullRes;
-
   // transition color to general
-  cmdImageTransition(cmd, useResolved ? m_frameBuffer.imgColorResolved : m_frameBuffer.imgColor,
-                     VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+#if USE_DLSS
+  if(m_frameBuffer.dlssMode == DlssMode::eSuperResolution)
+  {
+    cmdTransitionImageLayout(cmd, m_frameBuffer.dlssUpscaler.getGBuffer().getColorImage(DlssUpscaler::eDlssInputColor),
+                             m_frameBuffer.dlssSrColorLayout, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+  }
+  else
+#endif
+  {
+    cmdImageTransition(cmd, m_frameBuffer.imgColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+  }
 
   // transition depth read optimal
   cmdImageTransition(cmd, m_frameBuffer.imgDepthStencil, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
   m_hbaoPass.cmdCompute(cmd, m_hbaoFrame, frame.hbaoSettings);
+
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                         VK_ACCESS_2_SHADER_WRITE_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
 }
 
 bool Resources::compileShader(shaderc::SpvCompilationResult& compiled,
                               VkShaderStageFlagBits          shaderStage,
                               const std::filesystem::path&   filePath,
-                              shaderc::CompileOptions*       options)
+                              shaderc::CompileOptions*       options,
+                              const std::filesystem::path&   dumpFileName)
 {
   compiled = m_glslCompiler.compileFile(filePath, nvvkglsl::getShaderKind(shaderStage), options);
   if(compiled.GetCompilationStatus() == shaderc_compilation_status_success)
@@ -539,8 +811,8 @@ bool Resources::compileShader(shaderc::SpvCompilationResult& compiled,
     if(m_dumpSpirv)
     {
       // dump spirv files for improved aftermath debugging
-      std::filesystem::path dumpFile = filePath.filename();
-      dumpFile.replace_extension("spirv");
+      std::filesystem::path dumpFile = dumpFileName.empty() ? filePath.stem() : dumpFileName;
+      dumpFile += ".spirv";
 
       nvutils::dumpSpirv(dumpFile, nvvkglsl::GlslCompiler::getSpirv(compiled), nvvkglsl::GlslCompiler::getSpirvSize(compiled));
     }
@@ -553,6 +825,40 @@ bool Resources::compileShader(shaderc::SpvCompilationResult& compiled,
       nvutils::Logger::getInstance().log(nvutils::Logger::LogLevel::eWARNING, "%s", errorMessage.c_str());
     return false;
   }
+}
+
+bool Resources::compileShader(Shader&                      shader,
+                              VkShaderStageFlagBits        shaderStage,
+                              const std::filesystem::path& filePath,
+                              shaderc::CompileOptions*     options,
+                              const char*                  variant)
+{
+  shader.fileName = filePath.stem();
+  if(variant)
+  {
+    shader.fileName += std::string(".") + variant;
+  }
+  return compileShader(shader.compiled, shaderStage, filePath, options, shader.fileName);
+}
+
+void Resources::dumpPipelineInternals(VkPipeline pipeline, const Shader& shader)
+{
+  if(!m_dumpInternal)
+    return;
+
+  nvvk::dumpPipelineInternals(m_device, pipeline, shader.fileName);
+}
+
+void Resources::createComputePipeline(VkComputePipelineCreateInfo& compInfo, const Shader& shader, VkPipeline& pipeline)
+{
+  VkShaderModuleCreateInfo shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(shader);
+
+  compInfo.stage.pNext = &shaderInfo;
+  compInfo.flags |= getPipelineCreateFlags();
+
+  NVVK_CHECK(vkCreateComputePipelines(m_device, nullptr, 1, &compInfo, nullptr, &pipeline));
+
+  dumpPipelineInternals(pipeline, shader);
 }
 
 VkCommandBuffer Resources::createTempCmdBuffer()
@@ -600,7 +906,7 @@ void Resources::tempSyncSubmit(VkCommandBuffer cmd)
 void Resources::cmdBeginRendering(VkCommandBuffer cmd, bool hasSecondary, VkAttachmentLoadOp loadOpColor, VkAttachmentLoadOp loadOpDepth)
 {
   VkClearValue colorClear{.color = {m_bgColor.x, m_bgColor.y, m_bgColor.z, m_bgColor.w}};
-  VkClearValue depthClear{.depthStencil = {1.0F, 0}};
+  VkClearValue depthClear{.depthStencil = {0.0F, 0}};
 
   cmdImageTransition(cmd, m_frameBuffer.imgColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
   cmdImageTransition(cmd, m_frameBuffer.imgDepthStencil, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
@@ -641,6 +947,90 @@ void Resources::cmdBeginRendering(VkCommandBuffer cmd, bool hasSecondary, VkAtta
   vkCmdSetViewportWithCount(cmd, 1, &m_frameBuffer.viewport);
   vkCmdSetScissorWithCount(cmd, 1, &m_frameBuffer.scissor);
 }
+
+#if USE_DLSS
+void Resources::cmdBeginRenderingDlssSr(VkCommandBuffer cmd, VkAttachmentLoadOp loadOpColor, VkAttachmentLoadOp loadOpDepth, VkAttachmentLoadOp loadOpMotion)
+{
+  VkClearValue colorClear{.color = {m_bgColor.x, m_bgColor.y, m_bgColor.z, m_bgColor.w}};
+  VkClearValue motionClear{.color = {0.0F, 0.0F, 0.0F, 0.0F}};
+  VkClearValue depthClear{.depthStencil = {0.0F, 0}};
+
+  auto& gbuffer = m_frameBuffer.dlssUpscaler.getGBuffer();
+
+  cmdTransitionImageLayout(cmd, gbuffer.getColorImage(DlssUpscaler::eDlssInputColor), m_frameBuffer.dlssSrColorLayout,
+                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+  cmdTransitionImageLayout(cmd, gbuffer.getColorImage(DlssUpscaler::eDlssMotion), m_frameBuffer.dlssSrMotionLayout,
+                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+  cmdImageTransition(cmd, m_frameBuffer.imgDepthStencil, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+                     VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+  VkRenderingAttachmentInfo colorAttachments[2] = {
+      {
+          .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+          .imageView   = gbuffer.getColorImageView(DlssUpscaler::eDlssInputColor),
+          .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+          .loadOp      = loadOpColor,
+          .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+          .clearValue  = colorClear,
+      },
+      {
+          .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+          .imageView   = gbuffer.getColorImageView(DlssUpscaler::eDlssMotion),
+          .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+          .loadOp      = loadOpMotion,
+          .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+          .clearValue  = motionClear,
+      },
+  };
+
+  VkRenderingAttachmentInfo depthStencilAttachment{
+      .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+      .imageView   = m_frameBuffer.imgDepthStencil.descriptor.imageView,
+      .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+      .loadOp      = loadOpDepth,
+      .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+      .clearValue  = depthClear,
+  };
+
+  VkRenderingInfo renderingInfo{
+      .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+      .renderArea           = m_frameBuffer.scissor,
+      .layerCount           = 1,
+      .colorAttachmentCount = 2,
+      .pColorAttachments    = colorAttachments,
+      .pDepthAttachment     = &depthStencilAttachment,
+  };
+
+  vkCmdBeginRendering(cmd, &renderingInfo);
+
+  vkCmdSetViewportWithCount(cmd, 1, &m_frameBuffer.viewport);
+  vkCmdSetScissorWithCount(cmd, 1, &m_frameBuffer.scissor);
+}
+
+void Resources::cmdPrepareDlssSrEvaluation(VkCommandBuffer cmd)
+{
+  auto& gbuffer = m_frameBuffer.dlssUpscaler.getGBuffer();
+
+  cmdTransitionImageLayout(cmd, gbuffer.getColorImage(DlssUpscaler::eDlssInputColor), m_frameBuffer.dlssSrColorLayout,
+                           VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+  cmdTransitionImageLayout(cmd, gbuffer.getColorImage(DlssUpscaler::eDlssMotion), m_frameBuffer.dlssSrMotionLayout,
+                           VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+  cmdImageTransition(cmd, m_frameBuffer.imgDepthStencil, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, VK_IMAGE_LAYOUT_GENERAL);
+  cmdImageTransition(cmd, m_frameBuffer.imgColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+}
+
+bool Resources::cmdEvaluateDlssSr(VkCommandBuffer cmd, glm::vec2 jitter, nvvk::ProfilerGpuTimer& profiler)
+{
+  auto timerSection = profiler.cmdFrameSection(cmd, "DLSS-SR");
+  bool success      = m_frameBuffer.dlssUpscaler.upscale(cmd, jitter);
+  if(!success && !m_dlssEvaluateFailed)
+  {
+    LOGE("DLSS-SR evaluation failed; falling back to native rendering.\n");
+    m_dlssEvaluateFailed = true;
+  }
+  return success;
+}
+#endif
 
 void Resources::cmdBeginRayTracing(VkCommandBuffer cmd)
 {

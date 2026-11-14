@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #version 460
 
@@ -30,6 +16,9 @@
 #extension GL_EXT_buffer_reference : enable
 #extension GL_EXT_scalar_block_layout : enable
 #include "shaderio.h"
+#if USE_DLSS
+#include "dlss_util.h"
+#endif
 
 //////////////////////////////////////////////////////////////
 
@@ -43,6 +32,14 @@ layout(set = 0, binding = BINDINGS_RENDER_TARGET, rgba8) uniform image2D imgColo
 
 layout(set = 0, binding = BINDINGS_RAYTRACING_DEPTH, r32f) uniform image2D imgRaytracingDepth;
 
+#if USE_DLSS
+layout(set = 0, binding = BINDINGS_RENDER_TARGET + SHADERIO_eDlssAlbedo, rgba8)            uniform image2D imgDlssAlbedo;
+layout(set = 0, binding = BINDINGS_RENDER_TARGET + SHADERIO_eDlssSpecAlbedo, rgba16f)      uniform image2D imgDlssSpecAlbedo;
+layout(set = 0, binding = BINDINGS_RENDER_TARGET + SHADERIO_eDlssNormalRoughness, rgba16f) uniform image2D imgDlssNormalRoughness;
+layout(set = 0, binding = BINDINGS_RENDER_TARGET + SHADERIO_eDlssMotion, rg16f)            uniform image2D imgDlssMotion;
+layout(set = 0, binding = BINDINGS_RENDER_TARGET + SHADERIO_eDlssSpecHitDist, r16f)        uniform image2D imgDlssSpecHitDist;
+#endif
+
 //////////////////////////////////////////////////////////////
 
 layout(location = 0) rayPayloadEXT RayPayload rayHit;
@@ -54,8 +51,13 @@ void main()
   // for writing debugging values to stats.debug etc.
   bool center = gl_LaunchIDEXT.xy == (gl_LaunchSizeEXT.xy / 2);
 
+  vec2 pixelOffset = vec2(0.5);
+#if USE_DLSS
+  pixelOffset += view.jitter;
+#endif
+
   ivec2 screen = ivec2(gl_LaunchIDEXT.xy);
-  vec2  uv     = (vec2(gl_LaunchIDEXT.xy) + vec2(0.5)) / vec2(gl_LaunchSizeEXT.xy);
+  vec2  uv     = (vec2(gl_LaunchIDEXT.xy) + pixelOffset) / vec2(gl_LaunchSizeEXT.xy);
 
 
   vec2 d = uv * 2.0 - 1.0;
@@ -69,7 +71,7 @@ void main()
   float tMax = view.farPlane;
 
 #if DEBUG_VISUALIZATION
-  vec2 uvOffset            = (vec2(gl_LaunchIDEXT.xy) + vec2(1.5, 1.5)) / vec2(gl_LaunchSizeEXT.xy);
+  vec2 uvOffset            = (vec2(gl_LaunchIDEXT.xy) + pixelOffset + vec2(1.0, 1.0)) / vec2(gl_LaunchSizeEXT.xy);
   vec2 dOffset             = uvOffset * 2.0 - 1.0;
   vec4 targetOffsetX       = normalize(view.projMatrixI * vec4(dOffset.x, d.y, 1, 1));
   vec4 targetOffsetY       = normalize(view.projMatrixI * vec4(d.x, dOffset.y, 1, 1));
@@ -85,8 +87,37 @@ void main()
               0  // rayPayloadNV location qualifier
   );
 
+  bool  hitValid = rayHit.color.w != 0;
+  // reversed-Z, misses are at the far plane
+  float hitDepth = hitValid ? rayHit.color.w : 0.0;
+
   {
     imageStore(imgColor, screen, vec4(rayHit.color.xyz, 1));
-    imageStore(imgRaytracingDepth, screen, vec4(rayHit.color.w == 0 ? 1.0 : rayHit.color.w, 0.f, 0.f, 0.f));
+    imageStore(imgRaytracingDepth, screen, vec4(hitDepth, 0.f, 0.f, 0.f));
   }
+
+#if USE_DLSS
+  vec3 hitPos;
+  if(hitValid)
+  {
+    vec4 wPos = view.viewProjMatrixI * vec4(d.x, d.y, hitDepth, 1);
+    hitPos    = wPos.xyz / wPos.w;
+  }
+  else
+  {
+    hitPos = origin.xyz + direction.xyz * view.farPlane * 0.99f;
+  }
+
+#if DO_ANIMATION
+  vec3 hitPosPrev = hitValid ? rayHit.dlssWorldPosPrev : hitPos;
+  vec2 motionVec  = calculateMotionVector(hitPos, hitPosPrev, view.viewProjMatrixPrev, view.viewProjMatrix, view.viewportf);
+#else
+  vec2 motionVec = calculateMotionVector(hitPos, view.viewProjMatrixPrev, view.viewProjMatrix, view.viewportf);
+#endif
+  imageStore(imgDlssMotion, screen, vec4(motionVec.x, motionVec.y, 0, 0));
+  imageStore(imgDlssSpecHitDist, screen, vec4(0));
+  imageStore(imgDlssAlbedo, screen, rayHit.dlssAlbedo);
+  imageStore(imgDlssSpecAlbedo, screen, vec4(rayHit.dlssSpecular, 1.0f));
+  imageStore(imgDlssNormalRoughness, screen, rayHit.dlssNormalRoughness);
+#endif
 }

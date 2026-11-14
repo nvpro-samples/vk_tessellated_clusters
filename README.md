@@ -1,7 +1,7 @@
 # vk_tessellated_clusters
 
 This sample showcases dynamic tessellation with displacement that requires per-frame generation of clusters for ray tracing using `VK_NV_cluster_acceleration_structure`.
-It can also render the content using `VK_NV_mesh_shader`.
+It can also render the content using `VK_NV_mesh_shader` or `VK_EXT_mesh_shader`.
 
 Please have a look at the [vk_animated_clusters](https://github.com/nvpro-samples/vk_animated_clusters) sample prior this, to familiarize yourself with the new cluster extension. The DirectX 12 sample that demonstrates tessellation of OpenSubDiv surfaces can be found at [RTX Mega Geometry](https://github.com/NVIDIA-RTX/RTXMG).
 
@@ -85,8 +85,8 @@ uint16_t configs[] = {
 // ...
 
 // Caveat: for the TRANSIENT2X optimization to work (see later)
-// all configs <= 2,2,2 must have <= TESS_2X_MINI_TRIANGLES (4)
-//                            and <= TESS_2X_MINI_VERTICES (6)
+// all configs <= 2,2,2 must have <= TESS_2X_TRIANGLES (4)
+//                            and <= TESS_2X_VERTICES (6)
 
 } // namespace tessellation_table
 ```
@@ -107,6 +107,11 @@ struct TessellationTable
   BUFFER_REF(TessTableEntrys_in) entries;           // lookup table for each pattern's vertices and triangles
   BUFFER_REF(uint64s_in) templateAddresses;         // cluster template addresses for that pattern
   BUFFER_REF(uints_in) templateInstantiationSizes;  // max cluster instantiation size for the pattern
+
+  // templates that store a batch of independent lowly tessellated triangles,
+  // only used when the "combined templates" optimization is active (see later)
+  BUFFER_REF(uint64s_in) combinedTemplateAddresses;
+  BUFFER_REF(uints_in) combinedTemplateInstantiationSizes;
 };
 ```
 
@@ -123,7 +128,7 @@ To build the content we actually render, a series of dispatches and/or indirect 
 
 Next to the kernel files that are mentioned for the steps, these are the main files to look at:
 - [`shaders/common.h`](shaders/common.h): All data structures that are used by host and device can be found in `namespace shaderio` within this file.
-- [`renderer_raster_clusters_tess.cpp`](src/renderer_raster_clusters_tess.cpp): The renderer that implements rasterization using `VK_NV_mesh_shader`.
+- [`renderer_raster_clusters_tess.cpp`](src/renderer_raster_clusters_tess.cpp): The renderer that implements rasterization using `VK_NV_mesh_shader` or `VK_EXT_mesh_shader`.
 - [`renderer_raytrace_clusters_tess.cpp`](src/renderer_raytrace_clusters_tess.cpp): The renderer that implements ray tracing using `VK_NV_cluster_acceleration_structure`.
 
 All relevant indirect dispatches, and lists of pointers or structs are stored in the `shaderio::SceneBuilding` struct.
@@ -257,7 +262,8 @@ struct SceneBuilding
 
 4. **Classify Cluster**
    
-    The visible clusters are classified regarding their tessellation status, see [cluster_classify.comp.glsl](shaders/cluster_classify.comp.glsl).
+    The visible clusters are classified regarding their tessellation status, see [cluster_classify.comp.glsl](shaders/cluster_classify.comp.glsl)
+    and its two ray tracing variants that are described further below.
     We transform the cluster vertices into shared memory and then determine the tessellation factors for every triangle within the cluster.
     If all triangles are "simple" (i.e 1 x 1 x 1 segments) then the entire cluster is treated as "full cluster".
 
@@ -267,23 +273,16 @@ struct SceneBuilding
     Triangles that are subdivided small enough to fit in the tessellation table, are sent to the `partTriangles[]` list.
     Those that are too big and require recursive splitting are sent to `splitTriangles[]`.
 
-    For ray tracing the sample can apply some optional optimizations in this step by building **transient clusters**, the goal is to create less
+    For ray tracing the sample can apply some optional optimizations in this step, the goal is to create less
     clusters per frame, and increase the number of triangles within the generated clusters. This is an important optimization for ray tracing.
     Without these optimizations, all clusters are built through template instantiations.
-    
-    The ui option `use transient == 1x1x1` triggers the building of a transient cluster with all triangles that are simple, in case
-    the entire cluster wasn't classified simple. This avoids generating lots of template instantiations with just 1 triangle.
-    The triangle indices used for such transient cluster builds are stored within `genVertices[]` simply after the vertices.
 
-    When this codepath is triggered, we also store slightly different information in the `partTriangles[]` array to be able
-    to map the transient cluster's triangles (now less than the original cluster) back to the original triangle IDs. Multiple consecutive elements within `partTriangles[]` may be used
-    to store this uint8 array. Effectively we store `uint instanceID; uint clusterID; uint8_t triMappings[];`
-
-    The second ui option `use transient <= 2x2x2` can be enabled independently of the first, and batches every few lowly-subdivided triangles into a
-    transient cluster build. This time `partTriangles[]` stores `uint instanceID; uint clusterID; uint16_t triInfos[];` where the `triInfos[]` array allows
-    us to map every generated subdivided triangle back to the original cluster triangle, as well as which subdivision factors were used and the relative triangle index
-    within the subdivision. This information is later needed to generate appropriate UV coordinates within the hit shader.
-
+    The ui options `optimize == 1x1x1` and `optimize <= 2x2x2` pick which triangles get this treatment, the first covers the clusters
+    where no triangle requires tessellation, the second the triangles whose edge factors are all `<= 2`. The ui option `low tessellation mode`
+    picks the method, either through **transient clusters** or through **combined templates** (default). To ease readability and diffing, each of these optimizations has its own file:
+    - [cluster_classify.comp.glsl](shaders/cluster_classify.comp.glsl) (also used by rasterization)
+    - [cluster_classify_transient_lowtess.comp.glsl](shaders/cluster_classify_transient_lowtess.comp.glsl)
+    - [cluster_classify_combined_lowtess.comp.glsl](shaders/cluster_classify_combined_lowtess.comp.glsl)
 
     |Input | Output |
     |------|--------|
@@ -300,6 +299,53 @@ struct SceneBuilding
     |                                                | `transInstanceIDs[]`                     |
     |                                                | `transClusterAddresses[]`                |
     |                                                | `blasBuildInfos[instanceID].clusterReferencesCount` |
+
+    **Transient Clusters**
+
+    The ui option `optimize == 1x1x1` triggers the building of a transient cluster with all triangles that are simple, in case
+    the entire cluster wasn't classified simple. This avoids generating lots of template instantiations with just 1 triangle.
+    The triangle indices used for such transient cluster builds are stored within `genVertices[]` simply after the vertices.
+
+    When this codepath is triggered, we also store slightly different information in the `partTriangles[]` array to be able
+    to map the transient cluster's triangles (now less than the original cluster) back to the original triangle IDs. Multiple consecutive elements within `partTriangles[]` may be used
+    to store this uint8 array. Effectively we store `uint instanceID; uint clusterID; uint8_t triMappings[];`
+
+    The second ui option `optimize <= 2x2x2` can be enabled independently of the first, and batches every few lowly-subdivided triangles into a
+    transient cluster build. This time `partTriangles[]` stores `uint instanceID; uint clusterID; uint16_t triInfos[];` where the `triInfos[]` array allows
+    us to map every generated subdivided triangle back to the original cluster triangle, as well as which subdivision factors were used and the relative triangle index
+    within the subdivision. This information is later needed to generate appropriate UV coordinates within the hit shader.
+
+    **Combined Templates**
+
+    The transient cluster builds require a second cluster operation next to the template instantiation, and we have to generate
+    the triangle indices for them at runtime. The combined templates avoid both, they are **cluster templates** that we pre-generate at
+    init time and that already store a batch of independent lowly tessellated triangles. That way we never leave the template
+    instantiation codepath, and just like for any other template we only have to provide the vertices.
+    See [tessellation_combined.glsl](shaders/tessellation_combined.glsl) and `TessellationTable::initCombinedTemplates`.
+
+    > NOTE: Thanks to Jerran Schmidt <jschmidt@nvidia.com> for developing and testing the idea in a separate application.
+
+    We generate two families of these templates, and one template for every batch size within a family, so that a batch that
+    wasn't filled completely doesn't instantiate more triangles than it actually uses.
+
+    - The "1x" family stores `n` independent triangles, which means `3 x n` vertices and `n` triangles. `n` goes up to the ui option
+      `combined 1x1x1 batch size` (default 64). We use it for the triangles of a cluster that need no tessellation, just like the first
+      transient option. The triangle at index `i` always uses the vertices `i * 3 + 0/1/2`, so this time we do have to duplicate the
+      vertices per triangle and lose the connectivity that the transient build could benefit from.
+    - The "2x" family stores `n` independent 2x2x2 patches, which means `6 x n` vertices and `4 x n` triangles. `n` goes up to
+      `combined 2x2x2 batch size` (default 16). A patch is made out of the three corners of the base triangle and the mid point of each of
+      its three edges. All the lower configurations (1x1x1, 2x1x1, 2x2x1) come out of that very same topology by simply collapsing the mid point
+      of an edge with factor 1 onto one of the edge's corners. The triangles that referenced the collapsed vertex become degenerate and will
+      never be hit by a ray, while the remaining ones still cover the base triangle exactly.
+
+    Both families store their information at the back of `partTriangles[]` just like the transient clusters do. The "1x" family
+    stores `uint instanceID; uint clusterID; uint8_t triMappings[];` and the "2x" family `uint instanceID; uint clusterID; uint16_t patchInfos[];`,
+    where every `patchInfos[]` element gives us the original cluster triangle as well as the tessellation factors that the patch was
+    generated with. Given a patch always occupies the same number of triangles, the hit shader can compute which patch was hit from
+    `gl_PrimitiveID` directly, we don't need a mapping for every generated triangle anymore.
+
+    Compared to the transient builds we end up with bigger CLAS, we neither benefit from connectivity nor do we get rid of the
+    degenerate triangles, but the instantiation itself is cheaper than the build.
 
 5. **Build Setup `BUILD_SETUP_SPLIT`**
    
@@ -400,6 +446,8 @@ struct SceneBuilding
     Note: after instantiation we can toss away the `genVertices` and other inputs to the cluster build. That is why you
     will see that the sample overlaps the `blasBuildData` memory with this temporary transient data.
 
+    When the combined templates are used, there is nothing to build and we only run the instantiation below.
+
     **Template Instantiation**
 
     |Input | Output |
@@ -486,6 +534,65 @@ struct SceneBuilding
     
     Create the HiZ texture based on current depth buffer.
 
+## Low Tessellation Performance
+
+The low tessellation optimizations for ray tracing compared against each other, with both `optimize == 1x1x1` and `optimize <= 2x2x2` active,
+and against having none of them. Measured on an NVIDIA RTX PRO 5000 Blackwell with locked clocks, default bunny scene, 1 ambient occlusion
+and 1 shadow ray at 2560 x 1440. Timings are GPU time.
+
+``` bash
+vk_tessellated_clusters --headless --winsize 2560 1440 --supersample 1 --renderer 1 --dlss 0 --aosamples 1 --clusterconfig 0 --lowtess1x 1 --lowtess2x 1 --lowtessmode 1
+```
+
+64 triangles, 64 vertices per cluster (`--clusterconfig 0`):
+
+| | none | transient builds | combined templates |
+|------|-----:|-----:|-----:|
+| [us]                      |           |           |           |
+| Cluster Classify          |       455 |       579 |       631 |
+| PrepInstantiate           |       510 |        82 |        83 |
+| Clas Instantiate / Build  |      3054 |      1428 |      1157 |
+| Insert                    |       503 |       150 |       161 |
+| Blas Build                |      1214 |       362 |       364 |
+| Render (1 AO ray)         |       914 |       868 |       994 |
+| Render (2 AO rays)        |      1103 |      1047 |      1216 |
+| **Frame (1 AO ray)**      |  **6766** |  **3583** |  **3503** |
+| [units]                   |           |           |           |
+| Generated CLAS            |    747892 |    220599 |    227955 |
+| CLAS used (MiB)           |     408.6 |     230.9 |     258.0 |
+| Scratch (MiB)             |     154.8 |     154.8 |     154.8 |
+
+128 triangles, 128 vertices per cluster (`--clusterconfig 4`):
+
+| | none | transient builds | combined templates |
+|------|-----:|-----:|-----:|
+| [us]                      |           |           |           |
+| Cluster Classify          |       273 |       386 |       422 |
+| PrepInstantiate           |       631 |        82 |        83 |
+| Clas Instantiate / Build  |      3491 |      1323 |      1011 |
+| Insert                    |       564 |       108 |       117 |
+| Blas Build                |      1381 |       353 |       352 |
+| Render (1 AO ray)         |       923 |       883 |      1044 |
+| Render (2 AO rays)        |      1116 |      1067 |      1284 |
+| **Frame (1 AO ray)**      |  **7376** |  **3250** |  **3144** |
+| [units]                   |           |           |           |
+| Generated CLAS            |    843189 |    154382 |    165673 |
+| CLAS used (MiB)           |     447.6 |     212.9 |     245.7 |
+| Scratch (MiB)             |     154.8 |     154.8 |     154.8 |
+
+Both optimizations cut the number of generated CLAS to about a quarter, which more than halves the frame, as everything after the
+classification scales with the number of CLAS. Between the two:
+
+- **Transient builds** create the smallest CLAS that trace fastest, as they use the cluster's actual topology and vertex positions.
+  But building a CLAS from scratch is more expensive than an instantiation.
+- **Combined templates** only instantiate, which makes them the cheapest to build. The independent triangles and degenerate patch
+  triangles make the CLAS bigger (+12-15 %) and slower to trace (+15-18 %).
+
+The scratch memory is the same for all, it is dominated by the BLAS build.
+
+With few rays per pixel the cheaper build wins, hence combined templates are the default. The more rays are traced, the more
+transient builds become the better choice.
+
 ## Displacement Texturing
 
 The sample uses the unofficial glTF 2.0  [`KHR_materials_displacement`](https://github.com/KhronosGroup/glTF/issues/948) extension.
@@ -527,7 +634,6 @@ You can use the commandline to change some defaults:
 - Adaptive tessellation based on culling results for ray tracing: It might be better to gradually reduce tessellation of invisible objects. Currently the sample does a per-instance decision that is binary and therefore shadows of an invisible object might pop if an object becomes visible. One could fade tessellation rate based on distance to frustum planes for instances outside, and for occluded objects a time-based fading could be used. Alternatively, the [DirectX 12 sample](https://github.com/NVIDIA-RTX/RTXMG) on subdivision surface tessellation does use occlusion culling information on a per-patch level.
 - The tessellation factors are calculated based on the un-displaced vertices to reduce complexity of the sample.
 - Reduce memory consumption for rasterizer's low-tessellated triangles.
-- EXT_mesh_shader support
 
 ## Limitations
 
@@ -536,6 +642,7 @@ You can use the commandline to change some defaults:
 * Few error checks are performed on out of memory situations, which can happen on higher _"render copies"_ values, or the complexity of the loaded scene
 * If the cluster library generates clusters > 256 vertices, scene loading will fail. This should be addressed in future versions.
 * The number of threads used in the persistent kernel is basd on a crude heuristic for now and was not evaluated to be the optimal amount.
+* DLSS motion vectors don't reflect changes of the tessellation, which shift displaced surfaces slightly.
 
 ## Building and Running
 
@@ -549,8 +656,43 @@ We recommend starting with a `Release` build, as the `Debug` build has a lot mor
 
 The cmake setup will download the `Stanford Bunny` glTF 2.0 model that serves as default scene.
 
+If `USE_DLSS` is activated in the cmake options, then the DLSS/NGX runtime is downloaded by cmake setup as well:
+
+* **Ray tracing:** DLSS Ray Reconstruction (DLSS-RR) denoises the ambient occlusion (`DLSS - RR` in the UI, or `--dlss 1` with the ray tracer).
+* **Rasterization:** DLSS Super Resolution (DLSS-SR) upscales a jittered lower-resolution render (`DLSS - SR` in the UI, or `--dlss 1` with `--renderer 0`).
+
+Use `--dlssquality` or the UI quality preset to control the performance/quality trade-off.
+
 It will also look for [`nvpro_core2`](https://github.com/nvpro-samples/nvpro_core2) either as subdirectory of the current project directory, or up to two levels above. If it is not found, it will automatically download the git repo into `/build/_deps`.
 Note, that the repository of `nvpro_core2` needs to be updated manually in case the sample is updated manually, as version mismatches could occur over time.
+
+### Headless and Testing
+
+The sample can run without a window via `--headless` and it can walk a list of configurations on
+its own via `--sequencefile` or `--sequencestring`, which is also used for benchmarking, as the
+profiler results are printed after every sequence.
+
+``` bash
+vk_tessellated_clusters --headless --headlessframes 400 --sequencestring "SEQUENCE \"transient\" --sequenceframes 100 --lowtessmode 0 SEQUENCE \"combined\" --lowtessmode 1"
+```
+
+We use this for a set of tests that cover the various cluster building configurations as well as
+running out of memory, see [tests/README.md](tests/README.md).
+
+``` bash
+python tests/run_tests.py
+```
+
+### Camera Paths
+
+A camera path is a keyframed fly-through, authored in the UI (_Misc Settings -> Camera Paths_, with copy/paste of the
+path string, save/load to `<scene>.camerapaths.txt` next to the model) or given on the command line. For deterministic
+benchmarking `--runcamerapath <index> <framecount>` spreads a path across exactly that many frames, which is meant to be
+used within sequences, see [tests/camerapath.txt](tests/camerapath.txt). The index is the order of `--addcamerapath`.
+
+``` bash
+vk_tessellated_clusters --headless --addcamerapath "smooth 1 ; {-0.3,2.5,8}, {-0.3,1.2,0}, {0,1,0}, {45} ; {6,3,5}, {-0.3,1.2,0}, {0,1,0}, {45}" --sequencestring "SEQUENCE \"flythrough\" --sequenceframes 16 --runcamerapath 0 16"
+```
 
 ## Further Samples about NVIDIA RTX Mega Geometry
 

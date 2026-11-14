@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #ifndef _SHADERIO_CORE_H_
 #define _SHADERIO_CORE_H_
 
@@ -41,7 +27,8 @@ static uint32_t inline adjustClusterProperty(uint32_t in)
   static_assert(alignof(typ) == alignment || (alignment > alignof(typ) && ((alignment % alignof(typ)) == 0)),          \
                 "Alignment incompatible: " #refname)
 
-#define BUFFER_REF_DECLARE_SIZE(sizename, typ, size) static_assert(sizeof(typ) == size_t(size), "GLSL vs C++ size mismatch: " #typ)
+#define BUFFER_REF_DECLARE_SIZE(sizename, typ, size)                                                                   \
+  static_assert(sizeof(typ) == size_t(size), "GLSL vs C++ size mismatch: " #typ)
 
 #else  // GLSL
 
@@ -73,6 +60,8 @@ static uint32_t inline adjustClusterProperty(uint32_t in)
   };
 
 #define BUFFER_REF_DECLARE_SIZE(sizename, typ, size) const uint32_t sizename = size
+
+#define getWorkGroupIndexLinearized(workGroupID) (workGroupID.x + (workGroupID.y * gl_NumWorkGroups.x))
 
 #endif
 
@@ -106,7 +95,39 @@ struct DrawMeshTasksIndirectCommandNV
   uint first;
 };
 
+struct DrawMeshTasksIndirectCommandEXT
+{
+  uint gridX;
+  uint gridY;
+  uint gridZ;
+};
+
+#ifdef __cplusplus
+static inline
+#endif
+    uvec3
+    fit16bitLaunchGrid(uint count)
+{
+  // output grid dimensions must be <= 16 bit
+  // input count typically <= 24 bits
+
+  // keep 1D
+  if(count <= 0xFFFF)
+    return uvec3(count, 1, 1);
+
+  // The bit casting here makes sure we round up in case the cast to
+  // float rounded down:
+  float countF = float(count);
+  uint  n      = uint(ceil(uintBitsToFloat(floatBitsToUint(sqrt(countF)) + 1)));
+  // Now we find the last m such that n^2 - m^2 >= count.
+  // Then we can factorize the left-hand side as (n-m) * (n+m), and get an
+  // error that's m^2 better.
+  uint m = uint(sqrt(float(n * n - count)));
+
+  return uvec3(n - m, n + m, 1);
+}
+
 #ifdef __cplusplus
 }
 #endif
-#endif // _SHADERIO_CORE_H_
+#endif  // _SHADERIO_CORE_H_

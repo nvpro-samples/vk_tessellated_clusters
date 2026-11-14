@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
 
@@ -57,12 +43,19 @@ public:
   VkDeviceSize m_blasDataSize    = 0;
   VkDeviceSize m_clusterDataSize = 0;
 
-  VkDeviceSize m_scratchSize = 0;
+  VkDeviceSize m_scratchSize      = 0;
+  VkDeviceSize m_scratchAlignment = 0;
+  // the transient CLAS builds may overlap with the CLAS instantiations and use their own scratch range
+  VkDeviceSize m_scratchTransientOffset = 0;
   nvvk::Buffer m_scratchBuffer;
 
+  // worst-case CLAS size per triangle count, indexed by the number of triangles a
+  // transient build will contain
   std::vector<uint32_t> m_maxClusterSizes;
+  uint32_t              m_transient2xBatchTriangles = 0;
+  uint32_t              m_transient2xBatchVertices  = 0;
 
-  bool init(Resources& res, Scene& scene, const RendererConfig& config, TessellationTable* tessTable = nullptr);
+  bool init(Resources& res, Scene& scene, const RendererConfig& config, TessellationTable* tessTable = nullptr, uint32_t transient2xBatchSize = 0);
   void deinit(Resources& res);
 
   void initRayTracingTemplates(Resources& res, Scene& scene, const RendererConfig& config);

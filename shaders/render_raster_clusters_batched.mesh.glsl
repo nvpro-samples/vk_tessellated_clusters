@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /*
   
@@ -46,7 +32,11 @@
 #extension GL_EXT_scalar_block_layout : enable
 #extension GL_EXT_nonuniform_qualifier : enable
 
+#if USE_EXT_MESH_SHADER
+#extension GL_EXT_mesh_shader : require
+#else
 #extension GL_NV_mesh_shader : require
+#endif
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
@@ -97,12 +87,21 @@ layout(binding = BINDINGS_DISPLACED_TEXTURES, set = 0) uniform sampler2D displac
 
 ////////////////////////////////////////////
 
+#if USE_EXT_MESH_SHADER
+struct TaskExchange {
+#else
 taskNV in TaskExchange {
+#endif
   uint16_t  batchStartCount[SUBGROUP_SIZE];
   uint16_t  prefixsumTriangles[SUBGROUP_SIZE];
   uint16_t  prefixsumVertices[SUBGROUP_SIZE];
   uint     baseIndex;
+#if USE_EXT_MESH_SHADER
+};
+taskPayloadSharedEXT TaskExchange TASK;
+#else
 } TASK;
+#endif
 
 
 ////////////////////////////////////////////
@@ -170,10 +169,18 @@ void main()
   int taskVertexStart   = int(TASK.prefixsumVertices [batchStart + taskRead] - baseNumVertices);
   int taskTriangleStart = int(TASK.prefixsumTriangles[batchStart + taskRead] - baseNumTriangles);
   
+#if USE_EXT_MESH_SHADER
+  SetMeshOutputsEXT(numTotalVertices, numTotalTriangles);
+#endif
+
   if (gl_SubgroupInvocationID == 0)
   {
+#if !USE_EXT_MESH_SHADER
     gl_PrimitiveCountNV = numTotalTriangles;
+#endif
+#if USE_RENDER_STATS
     atomicAdd(readback.numTotalTriangles, numTotalTriangles);
+#endif
 #if TESS_GENERATE_HISTOGRAM
     atomicAdd(readback.histogram[numTotalTriangles], 1);
 #endif
@@ -364,7 +371,11 @@ void main()
       #endif
         vec3 wPos    = (worldMatrix * vec4(oPos,1.0)).xyz;
 
-        gl_MeshVerticesNV[vert].gl_Position = view.viewProjMatrix * vec4(wPos,1);
+      #if USE_EXT_MESH_SHADER
+        gl_MeshVerticesEXT[vert].gl_Position = view.viewProjMatrixRender * vec4(wPos,1);
+      #else
+        gl_MeshVerticesNV[vert].gl_Position = view.viewProjMatrixRender * vec4(wPos,1);
+      #endif
       #if ALLOW_SHADING
         OUT[vert].wPos                      = wPos.xyz;
       #if ALLOW_VERTEX_NORMALS
@@ -429,10 +440,15 @@ void main()
       {
         partID = view.visualize == VISUALIZE_TRIANGLES ? triLocal * 3 : partID; // (((triLocal + 1) << 8) ^ partID)
       
+      #if USE_EXT_MESH_SHADER
+        gl_PrimitiveTriangleIndicesEXT[tri] = indices + uint(vertexStart);
+        gl_MeshPrimitivesEXT[tri].gl_PrimitiveID = int((triangleID & 0xFF) | ((partID | 1) << 8)); //tri
+      #else
         gl_PrimitiveIndicesNV[tri * 3 + 0] = indices.x + vertexStart;
         gl_PrimitiveIndicesNV[tri * 3 + 1] = indices.y + vertexStart;
         gl_PrimitiveIndicesNV[tri * 3 + 2] = indices.z + vertexStart;
         gl_MeshPrimitivesNV[tri].gl_PrimitiveID = int((triangleID & 0xFF) | ((partID | 1) << 8)); //tri
+      #endif
       }
     }
   }

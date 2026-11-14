@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #ifndef _SHADERIO_H_
 #define _SHADERIO_H_
@@ -53,9 +39,10 @@
 #define BINDINGS_SCENEBUILDING_UBO 5
 #define BINDINGS_HIZ_TEX 6
 #define BINDINGS_TLAS 7
-#define BINDINGS_RENDER_TARGET 8
-#define BINDINGS_RAYTRACING_DEPTH 9
-#define BINDINGS_DISPLACED_TEXTURES 10
+#define BINDINGS_RAYTRACING_DEPTH 8
+#define BINDINGS_DISPLACED_TEXTURES 9
+// DLSS buffers start here as well
+#define BINDINGS_RENDER_TARGET 10
 
 /////////////////////////////////////////
 
@@ -93,10 +80,15 @@
 #define RT_CLUSTER_MODE_FULL_CLUSTER 0
 // A cluster that represents a single tessellated region with a triangle (part triangle)
 #define RT_CLUSTER_MODE_SINGLE_TESSELLATED 1
-// A cluster that is a subset of a non-tessellated cluster (result of TESS_USE_1X_TRANSIENTBUILDS)
+// A cluster that is a subset of a non-tessellated cluster
+// (result of TESS_USE_1X_TRANSIENTBUILDS or TESS_USE_1X_COMBINEDTEMPLATES)
 #define RT_CLUSTER_MODE_1X_SUBSET_CLUSTER 2
-// A cluster that contains a batch of low-tessellated triangles (result of TESS_USE_2X_TRANSIENTBUILDS)
+// A cluster that contains a batch of low-tessellated triangles
+// (result of TESS_USE_2X_TRANSIENTBUILDS or TESS_USE_2X_COMBINEDTEMPLATES)
 #define RT_CLUSTER_MODE_2X_BATCHED_TESSELLATED 3
+
+// Note: the transient build and the combined template optimizations are mutually exclusive,
+// hence they can share the two mode values above.
 
 /////////////////////////////////////////
 
@@ -140,22 +132,59 @@
 #define TESS_USE_TRANSIENTBUILDS                                                                                       \
   ((TESS_USE_1X_TRANSIENTBUILDS || TESS_USE_2X_TRANSIENTBUILDS) && !TARGETS_RASTERIZATION)
 
+// The combined template optimization is the alternative to the transient builds.
+// Rather than building CLAS from scratch for the low-tessellated triangles, we instantiate
+// pre-built templates that store a batch of independent triangles / independent 2x2x2 patches.
+// This is expected to be a bit slower than the transient builds (no vertex re-use, and the
+// templates cannot know the actual spatial layout of a batch), but it keeps the entire
+// runtime on a single codepath: everything is a template instantiation.
+
+#ifndef TESS_USE_1X_COMBINEDTEMPLATES
+#define TESS_USE_1X_COMBINEDTEMPLATES 0
+#endif
+
+#ifndef TESS_USE_2X_COMBINEDTEMPLATES
+#define TESS_USE_2X_COMBINEDTEMPLATES 0
+#endif
+
+#define TESS_USE_COMBINEDTEMPLATES                                                                                     \
+  ((TESS_USE_1X_COMBINEDTEMPLATES || TESS_USE_2X_COMBINEDTEMPLATES) && !TARGETS_RASTERIZATION)
+
+// Both optimizations store their per-CLAS information at the back of the `partTriangles` array.
+#define TESS_USE_LOWTESS_PARTS (TESS_USE_TRANSIENTBUILDS || TESS_USE_COMBINEDTEMPLATES)
+
 // must be <= SUBGROUP_SIZE
 
 #ifndef TESS_INSTANTIATE_BATCHSIZE
 #define TESS_INSTANTIATE_BATCHSIZE 32
 #endif
 
-#ifndef TESS_2X_MINI_BATCHSIZE
-#define TESS_2X_MINI_BATCHSIZE 8
+#ifndef TESS_TRANSIENT_2X_BATCHSIZE
+#define TESS_TRANSIENT_2X_BATCHSIZE 32
 #endif
 
 #ifndef TESS_MAX_SPLIT_FACTOR
 #define TESS_MAX_SPLIT_FACTOR 8
 #endif
 
-#define TESS_2X_MINI_TRIANGLES 4
-#define TESS_2X_MINI_VERTICES 6
+// worst-case triangles and vertices of a triangle whose tessellation factors are all <= 2.
+// The transient builds use them to size a batch, the combined templates use them as the fixed
+// size of a patch: 3 corners + 3 edge mid points and 4 triangles. Lower configurations are
+// achieved by collapsing the mid point of an edge onto one of its corners, which makes the
+// surplus triangles degenerate.
+#define TESS_2X_TRIANGLES 4
+#define TESS_2X_VERTICES 6
+
+// number of independent triangles a single "1x" combined template stores at most
+#ifndef TESS_COMBINED_1X_BATCHSIZE
+#define TESS_COMBINED_1X_BATCHSIZE 64
+#endif
+
+// number of independent 2x2x2 patches a single "2x" combined template stores at most
+// must be <= SUBGROUP_SIZE and a power of two
+#ifndef TESS_COMBINED_2X_BATCHSIZE
+#define TESS_COMBINED_2X_BATCHSIZE 16
+#endif
 
 #if TESS_INSTANTIATE_BATCHSIZE > SUBGROUP_SIZE
 #error "invalid TESS_INSTANTIATE_BATCHSIZE"
@@ -173,6 +202,19 @@
 #define TESS_GENERATE_HISTOGRAM 1
 #endif
 
+#ifndef USE_RENDER_STATS
+#define USE_RENDER_STATS 1
+#endif
+
+#ifndef USE_DLSS
+#define USE_DLSS 0
+#endif
+
+// ray tracing writes the guide buffers for DLSS-RR
+#ifndef USE_DLSS_GUIDE_BUFFERS
+#define USE_DLSS_GUIDE_BUFFERS USE_DLSS
+#endif
+
 /////////////////////////////////////////
 
 #ifdef __cplusplus
@@ -183,6 +225,9 @@ using namespace glm;
 
 struct FrameConstants
 {
+  // jittered version for DLSS
+  mat4 viewProjMatrixRender;
+
   mat4 projMatrix;
   mat4 projMatrixI;
 
@@ -193,6 +238,9 @@ struct FrameConstants
   vec4 viewPos;
   vec4 viewDir;
   vec4 viewPlane;
+
+  // for motion vectors
+  mat4 viewProjMatrixPrev;
 
   mat4 skyProjMatrixI;
 
@@ -225,7 +273,8 @@ struct FrameConstants
   float   animationRippleAmplitude;
   float   animationRippleSpeed;
 
-  uvec3 _pad;
+  float animationStatePrev;
+  uvec2 _pad;
   uint  visualize;
 
   uint  doAnimation;
@@ -260,6 +309,9 @@ struct FrameConstants
   uint  doWireframe;
   uint  visFilterInstanceID;
   uint  visFilterClusterID;
+
+  vec2 jitter;
+  vec2 _pad2;
 
   SkySimpleParameters skyParams;
 };
@@ -323,6 +375,15 @@ struct RayPayload
 #if DEBUG_VISUALIZATION
   // Ray direction through the pixel at y+1 for ray differentials
   vec4 differentialY;
+#endif
+#if USE_DLSS_GUIDE_BUFFERS
+  vec4 dlssNormalRoughness;
+  vec4 dlssAlbedo;
+  vec3 dlssSpecular;
+#if DO_ANIMATION
+  // for motion vectors of the animated surface
+  vec3 dlssWorldPosPrev;
+#endif
 #endif
 };
 

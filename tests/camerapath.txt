@@ -1,0 +1,9 @@
+# Fly a short path around the default bunny. The path is global, the sequences below only
+# pick it up (`--runcamerapath <index> <framecount>`) and match --sequenceframes to the count.
+
+--addcamerapath "smooth 1 loop 0 dur 4 ; {-0.3, 2.5, 8}, {-0.3, 1.2, 0}, {0, 1, 0}, {45} ; {6, 3, 5}, {-0.3, 1.2, 0}, {0, 1, 0}, {45} ; {8, 1.5, -2}, {-0.3, 1.2, 0}, {0, 1, 0}, {45} ; {2, 4, -6}, {-0.3, 1.2, 0}, {0, 1, 0}, {45}"
+
+SEQUENCE "raster_flythrough"  --sequenceframes 16 --sequenceresetframes 2 --renderer 0 --runcamerapath 0 16
+SEQUENCE "raster_close"       --tessrate 2 --runcamerapath 0 16
+SEQUENCE "raytrace_flythrough" --renderer 1 --lowtessmode 1 --runcamerapath 0 16
+SEQUENCE "raytrace_animated"  --animation 1 --culling 1 --runcamerapath 0 16

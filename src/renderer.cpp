@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include <random>
 #include <vector>
@@ -30,11 +16,25 @@
 
 namespace tessellatedclusters {
 
+static bool useDlssSr(Resources& res, const RendererConfig& config)
+{
+#if USE_DLSS
+  return config.useDlss && res.m_frameBuffer.dlssMode == Resources::DlssMode::eSuperResolution;
+#else
+  return false;
+#endif
+}
+
 bool Renderer::initBasicShaders(Resources& res, Scene& scene, const RendererConfig& config)
 {
+  // with DLSS-SR the sky writes the motion vectors as well
+  shaderc::CompileOptions backgroundOptions = res.makeCompilerOptions();
+  backgroundOptions.AddMacroDefinition("USE_DLSS", useDlssSr(res, config) ? "1" : "0");
+
   res.compileShader(m_basicShaders.fullScreenVertexShader, VK_SHADER_STAGE_VERTEX_BIT, "fullscreen.vert.glsl");
   res.compileShader(m_basicShaders.fullscreenWriteDepthFragShader, VK_SHADER_STAGE_FRAGMENT_BIT, "fullscreen_write_depth.frag.glsl");
-  res.compileShader(m_basicShaders.fullscreenBackgroundFragShader, VK_SHADER_STAGE_FRAGMENT_BIT, "fullscreen_background.frag.glsl");
+  res.compileShader(m_basicShaders.fullscreenBackgroundFragShader, VK_SHADER_STAGE_FRAGMENT_BIT,
+                    "fullscreen_background.frag.glsl", &backgroundOptions);
 
   if(!res.verifyShaders(m_basicShaders))
   {
@@ -190,6 +190,7 @@ void Renderer::initBasics(Resources& res, Scene& scene, const RendererConfig& co
     }
 
     renderInstance.worldMatrix  = worldMatrix;
+    renderInstance.worldMatrixI = glm::inverse(worldMatrix);
     renderInstance.numVertices  = geometry.numVertices;
     renderInstance.numClusters  = geometry.numClusters;
     renderInstance.numTriangles = geometry.numTriangles;
@@ -360,6 +361,7 @@ void Renderer::initBasicPipelines(Resources& res, Scene& scene, const RendererCo
 
   nvvk::GraphicsPipelineCreator graphicsGen;
   graphicsGen.pipelineInfo.layout                    = m_basicPipelineLayout;
+  graphicsGen.pipelineInfo.flags                     = res.getPipelineCreateFlags();
   graphicsGen.renderingState.depthAttachmentFormat   = res.m_frameBuffer.pipelineRenderingInfo.depthAttachmentFormat;
   graphicsGen.renderingState.stencilAttachmentFormat = res.m_frameBuffer.pipelineRenderingInfo.stencilAttachmentFormat;
   graphicsGen.colorFormats                           = {res.m_frameBuffer.colorFormat};
@@ -368,15 +370,30 @@ void Renderer::initBasicPipelines(Resources& res, Scene& scene, const RendererCo
   state.depthStencilState.depthCompareOp   = VK_COMPARE_OP_ALWAYS;
   state.rasterizationState.cullMode        = VK_CULL_MODE_NONE;
 
+#if USE_DLSS
+  if(useDlssSr(res, config))
+  {
+    // color and motion vectors
+    graphicsGen.colorFormats = res.m_frameBuffer.dlssUpscaler.getBufferFormats();
+    state.colorWriteMasks.resize(2, state.colorWriteMasks[0]);
+    state.colorBlendEnables.resize(2, state.colorBlendEnables[0]);
+    state.colorBlendEquations.resize(2, state.colorBlendEquations[0]);
+  }
+#endif
+
   graphicsGen.addShader(VK_SHADER_STAGE_VERTEX_BIT, "main",
                         nvvkglsl::GlslCompiler::getSpirvData(m_basicShaders.fullScreenVertexShader));
   graphicsGen.addShader(VK_SHADER_STAGE_FRAGMENT_BIT, "main",
                         nvvkglsl::GlslCompiler::getSpirvData(m_basicShaders.fullscreenBackgroundFragShader));
 
   graphicsGen.createGraphicsPipeline(res.m_device, nullptr, state, &m_basicPipelines.background);
+  res.dumpPipelineInternals(m_basicPipelines.background, m_basicShaders.fullscreenBackgroundFragShader);
 
   graphicsGen.clearShaders();
-  state.colorWriteMasks = {0};
+  graphicsGen.colorFormats  = {res.m_frameBuffer.colorFormat};
+  state.colorWriteMasks     = {0};
+  state.colorBlendEnables   = {state.colorBlendEnables[0]};
+  state.colorBlendEquations = {state.colorBlendEquations[0]};
 
   graphicsGen.addShader(VK_SHADER_STAGE_VERTEX_BIT, "main",
                         nvvkglsl::GlslCompiler::getSpirvData(m_basicShaders.fullScreenVertexShader));
@@ -384,6 +401,7 @@ void Renderer::initBasicPipelines(Resources& res, Scene& scene, const RendererCo
                         nvvkglsl::GlslCompiler::getSpirvData(m_basicShaders.fullscreenWriteDepthFragShader));
 
   graphicsGen.createGraphicsPipeline(res.m_device, nullptr, state, &m_basicPipelines.writeDepth);
+  res.dumpPipelineInternals(m_basicPipelines.writeDepth, m_basicShaders.fullscreenWriteDepthFragShader);
 }
 
 void Renderer::writeRayTracingDepthBuffer(VkCommandBuffer cmd)

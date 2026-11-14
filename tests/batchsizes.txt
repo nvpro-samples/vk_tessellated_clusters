@@ -1,0 +1,15 @@
+# The batch sizes of both low tessellation mechanisms, walked across their range including the
+# extremes. A batch may be bigger than the scene's own clusters, the renderer clamps against the
+# device limits and the 8-bit indices, so out of range values must end up clamped rather than
+# mis-built or reading past the pre-computed cluster size table.
+
+SEQUENCE "batch_min"        --sequenceframes 8 --sequenceresetframes 2 --renderer 1 --lowtessmode 1 --combined1xbatch 1 --combined2xbatch 1
+SEQUENCE "batch_small"      --combined1xbatch 4 --combined2xbatch 2
+SEQUENCE "batch_default"    --combined1xbatch 32 --combined2xbatch 8
+SEQUENCE "batch_max"        --combined1xbatch 85 --combined2xbatch 32
+SEQUENCE "batch_clamped"    --combined1xbatch 512 --combined2xbatch 512
+SEQUENCE "batch_nonpow2_2x" --combined1xbatch 17 --combined2xbatch 7
+SEQUENCE "transient_batch_min"     --lowtessmode 0 --transient2xbatch 1
+SEQUENCE "transient_batch_default" --transient2xbatch 8
+SEQUENCE "transient_batch_max"     --transient2xbatch 32
+SEQUENCE "transient_batch_clamped" --transient2xbatch 512

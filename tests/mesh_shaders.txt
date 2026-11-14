@@ -1,0 +1,14 @@
+# EXT_mesh_shader against NV_mesh_shader, with and without the task shader batching. The
+# default scene exceeds 65535 full clusters and part triangles, so the EXT launch grids are 2D
+# and the shaders must skip the overshoot. Without NV support EXT is forced on.
+
+SEQUENCE "nv_batched"           --sequenceframes 8 --sequenceresetframes 2 --renderer 0 --extmeshshader 0 --batchmeshlets 1
+SEQUENCE "ext_batched"          --extmeshshader 1
+SEQUENCE "ext_unbatched"        --batchmeshlets 0
+SEQUENCE "ext_unbatched_fine"   --tessrate 1
+SEQUENCE "ext_batched_fine"     --batchmeshlets 1
+SEQUENCE "ext_animated_culled"  --tessrate 4 --animation 1 --culling 1
+SEQUENCE "ext_unbatched_starved" --animation 0 --culling 0 --batchmeshlets 0 --tessrate 1 --partbits 12
+SEQUENCE "ext_batched_starved"  --batchmeshlets 1
+SEQUENCE "raytrace"             --renderer 1 --partbits 20 --tessrate 4
+SEQUENCE "nv_raster_again"      --renderer 0 --extmeshshader 0

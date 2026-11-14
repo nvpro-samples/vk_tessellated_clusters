@@ -1,0 +1,9 @@
+# "pixels per segment", lower means more tessellation. This drives how many triangles
+# end up in the part triangle list, in the split list and how many vertices we generate.
+
+SEQUENCE "rate_coarse"      --sequenceframes 8 --sequenceresetframes 2 --renderer 1 --lowtessmode 1 --tessrate 32
+SEQUENCE "rate_default"     --tessrate 4
+SEQUENCE "rate_fine"        --tessrate 2
+SEQUENCE "rate_extreme"     --tessrate 1
+SEQUENCE "rate_extreme_transient" --lowtessmode 0
+SEQUENCE "rate_extreme_none" --lowtess1x 0 --lowtess2x 0

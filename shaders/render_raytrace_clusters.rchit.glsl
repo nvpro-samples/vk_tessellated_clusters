@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /*
   
@@ -116,11 +102,20 @@ layout(location = 1) rayPayloadEXT RayPayload rayHitAO;
 
 #if TESS_ACTIVE
 #include "tessellation.glsl"
+#if TESS_USE_COMBINEDTEMPLATES
+#include "tessellation_combined.glsl"
+#endif
 #endif
 
 
 #define SUPPORTS_RT 1
 
+#if USE_DLSS
+#include "dlss_util.h"
+#endif
+#if USE_DLSS_GUIDE_BUFFERS && DO_ANIMATION
+#include "displacement.glsl"
+#endif
 #include "render_shading.glsl"
 
 /////////////////////////////////
@@ -133,10 +128,10 @@ void main()
   
 #if TESS_ACTIVE
   uint mode = (clusterID >> 30);
-  bool isSpecial        = mode != RT_CLUSTER_MODE_FULL_CLUSTER;
-  bool isTessTriangle   = mode == RT_CLUSTER_MODE_SINGLE_TESSELLATED;
-  bool isSimpleTriangle = mode == RT_CLUSTER_MODE_1X_SUBSET_CLUSTER;
-  bool isMiniTriangle   = mode == RT_CLUSTER_MODE_2X_BATCHED_TESSELLATED;
+  bool isSpecial         = mode != RT_CLUSTER_MODE_FULL_CLUSTER;
+  bool isTessTriangle    = mode == RT_CLUSTER_MODE_SINGLE_TESSELLATED;
+  bool isSimpleTriangle  = mode == RT_CLUSTER_MODE_1X_SUBSET_CLUSTER;
+  bool isLow2xTriangle   = mode == RT_CLUSTER_MODE_2X_BATCHED_TESSELLATED;
 
   // remove top mode bits
   clusterID &= 0x3FFFFFFF;
@@ -145,19 +140,52 @@ void main()
   uint partID        = view.visualize == VISUALIZE_TRIANGLES ? triangleID + 1 : 0;;
   uint subTriangleID = triangleID;
   uint cfg           = 0;
+#if TESS_USE_2X_COMBINEDTEMPLATES
+  // when hitting a "2x" combined template, the triangle belongs to one of its 2x2x2 patches
+  bool  isPatchTriangle = false;
+  uint  patchTriangleID = 0;
+  uvec3 patchFactors    = uvec3(1);
+#endif
   if(isSpecial)
   {
     tessInfo   = build.partTriangles.d[clusterID];
 
+  #if TESS_USE_2X_COMBINEDTEMPLATES
+    if (isLow2xTriangle)
+    {
+      // Every patch of the template occupies TESS_2X_TRIANGLES triangles,
+      // hence no per-triangle mapping table is required, we can derive the patch directly.
+      uint patchIndex = triangleID / TESS_2X_TRIANGLES;
+      patchTriangleID = triangleID % TESS_2X_TRIANGLES;
+
+      uint packedPatch = uint16s_in(build.lowtessTriMappings).d[(clusterID * (TessTriangleInfo_size/2) + (ClusterInfo_size/2)) + patchIndex];
+      // cluster triangle
+      triangleID   = tessc_unpackPatchTriangleID(packedPatch);
+      // the tessellation factors that were used, they define which vertices were collapsed
+      patchFactors = tessc_unpackPatchFactors(packedPatch);
+
+      isPatchTriangle = true;
+      isTessTriangle  = true;
+    }
+    else
+  #endif
+  #if TESS_USE_1X_COMBINEDTEMPLATES
+    if (isSimpleTriangle)
+    {
+      // remap triangle ID, the template stored one independent triangle per slot
+      triangleID = build.lowtessTriMappings.d[clusterID * TessTriangleInfo_size + ClusterInfo_size + triangleID];
+    }
+    else
+  #endif
   #if TESS_USE_2X_TRANSIENTBUILDS
-    if (isMiniTriangle)
+    if (isLow2xTriangle)
     {
       // remap triangle ID
-      uint packedTriangleID = uint16s_in(build.transTriMappings).d[(clusterID * (TessTriangleInfo_size/2) + (ClusterInfo_size/2)) + triangleID];
+      uint packedTriangleID = uint16s_in(build.lowtessTriMappings).d[(clusterID * (TessTriangleInfo_size/2) + (ClusterInfo_size/2)) + triangleID];
       // cluster triangle
       triangleID    = packedTriangleID & 0xff;
-      // tessellated config triangle
-      subTriangleID = (packedTriangleID >> 8) & 4;
+      // tessellated config triangle (4 bits, a config <= 2x2x2 has at most 4 triangles)
+      subTriangleID = (packedTriangleID >> 8) & 0xF;
       // get tessellation levels for local config
       tessInfo.subTriangle.vtxEncoded.x = tess_encodeBarycentrics(0,0);
       tessInfo.subTriangle.vtxEncoded.y = tess_encodeBarycentrics(TESSTABLE_COORD_MAX,0);
@@ -175,7 +203,7 @@ void main()
     if (isSimpleTriangle)
     {
       // remap triangle ID
-      triangleID = build.transTriMappings.d[clusterID * TessTriangleInfo_size + ClusterInfo_size + triangleID];
+      triangleID = build.lowtessTriMappings.d[clusterID * TessTriangleInfo_size + ClusterInfo_size + triangleID];
     }
     else
   #endif
@@ -204,7 +232,25 @@ void main()
   vec3 baryWeightBase = baryWeight;
 
 #if TESS_ACTIVE
-  
+
+#if TESS_USE_2X_COMBINEDTEMPLATES
+  if(isPatchTriangle)
+  {
+    // The template's patch always provides the full 2x2x2 topology, the actual
+    // tessellation configuration is expressed through collapsed vertices.
+    uvec3 patchIndices = tessc_getPatchTriangleVertices(patchTriangleID);
+
+    // barycentrics from patch-triangle to base-triangle
+    baryWeightBase =
+      tessc_getPatchVertexBarycentrics(patchIndices.x, patchFactors) * baryWeight.x +
+      tessc_getPatchVertexBarycentrics(patchIndices.y, patchFactors) * baryWeight.y +
+      tessc_getPatchVertexBarycentrics(patchIndices.z, patchFactors) * baryWeight.z;
+
+    partID = view.visualize == VISUALIZE_TRIANGLES ? patchTriangleID * 3 : 1;
+    partID = triangleID | ((partID | 1) << 8);
+  }
+  else
+#endif
   if(isTessTriangle)
   {
     vec3 baseBarycentrics[3];
@@ -288,7 +334,12 @@ void main()
     if(view.doShadow == 1)
       sunContribution = traceShadowRay(wPos, directionToLight);
 
-    shaded = shading(gl_InstanceID, wPos, wNrm, clusterShadeID, sunContribution, ambientOcclusion);
+    shaded = shading(gl_InstanceID, wPos, wNrm, clusterShadeID, sunContribution, ambientOcclusion
+#if USE_DLSS_GUIDE_BUFFERS
+                     ,
+                     rayHit.dlssAlbedo, rayHit.dlssSpecular, rayHit.dlssNormalRoughness
+#endif
+    );
   }
 #if TESS_ACTIVE
   if (view.visualize == VISUALIZE_TESSELLATED_TRIANGLES)
@@ -337,4 +388,9 @@ void main()
 
   vec4 projPos   = view.viewProjMatrix * vec4(wPos, 1.f);
   rayHit.color.w = projPos.z / projPos.w;
+
+#if USE_DLSS_GUIDE_BUFFERS && DO_ANIMATION
+  vec3 oPosPrev           = rippleDeformPrev(oPos, gl_InstanceID, instances[gl_InstanceID].geoHi.w);
+  rayHit.dlssWorldPosPrev = vec3(gl_ObjectToWorldEXT * vec4(oPosPrev, 1.0));
+#endif
 }

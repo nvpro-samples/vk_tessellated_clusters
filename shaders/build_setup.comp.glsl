@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /*
   
@@ -132,6 +118,32 @@ void main()
     counterFull = min(counterFull, maxEntriesFull);
     counterPart = min(counterPart, maxEntriesPart);
 
+#if USE_EXT_MESH_SHADER
+    // EXT launch grids are limited to 16 bit per dimension and a total count.
+    // The 2D grid can overshoot, the mesh/task shaders test against the clamped counters.
+    counterFull = min(counterFull, MESHSHADER_MAX_WORKGROUPS);
+  #if TESS_RASTER_USE_BATCH
+    counterPart = min(counterPart, MESHSHADER_MAX_WORKGROUPS * SUBGROUP_SIZE);
+  #else
+    counterPart = min(counterPart, MESHSHADER_MAX_WORKGROUPS);
+  #endif
+    buildRW.fullClusterCounter  = counterFull;
+    buildRW.partTriangleCounter = counterPart;
+
+    uvec3 grid = fit16bitLaunchGrid(counterFull);
+    buildRW.drawFullClustersEXT.gridX = grid.x;
+    buildRW.drawFullClustersEXT.gridY = grid.y;
+    buildRW.drawFullClustersEXT.gridZ = grid.z;
+  #if TESS_RASTER_USE_BATCH
+    grid = fit16bitLaunchGrid((counterPart + SUBGROUP_SIZE - 1) / SUBGROUP_SIZE);
+  #else
+    grid = fit16bitLaunchGrid(counterPart);
+  #endif
+    buildRW.drawPartTrianglesEXT.gridX = grid.x;
+    buildRW.drawPartTrianglesEXT.gridY = grid.y;
+    buildRW.drawPartTrianglesEXT.gridZ = grid.z;
+#endif
+
     buildRW.drawFullClusters.first  = 0;
     buildRW.drawFullClusters.count  = counterFull;
 #if TESS_RASTER_USE_BATCH
@@ -152,7 +164,7 @@ void main()
     uint count = min(buildRW.splitTriangleCounter, MAX_SPLIT_TRIANGLES);
     buildRW.splitWriteCounter    = count;
     buildRW.splitTriangleCounter = int(count);
-    buildRW.partTriangleCounter  = buildRW_partTriangleCounter();
+    buildRW.partTriangleCounter  = buildRW_partTriangleCounterClamped();
   #if !TESS_USE_PERSISTENT_KERNEL
     buildRW.splitPassStart = 0;
     buildRW.splitPassEnd   = count;
@@ -239,18 +251,19 @@ void main()
     const uint maxEntriesPart = MAX_PART_TRIANGLES;
     uint counterPart = buildRW_partTriangleCounter();
     
-  #if TESS_USE_TRANSIENTBUILDS
-    uint counterPartTransient  = buildRW_partTriangleCounterTransient();
-    readback.numPartTriangles  = counterPart + counterPartTransient;
-    readback.numTransPartTriangles = counterPartTransient;
+  #if TESS_USE_LOWTESS_PARTS
+    uint counterPartLowtess       = buildRW_partTriangleCounterLowtess();
+    readback.numPartTriangles  = counterPart + counterPartLowtess;
+    readback.numTransPartTriangles = counterPartLowtess;
   #else
     readback.numPartTriangles  = counterPart;
   #endif
     readback.numSplitTriangles = buildRW.splitWriteCounter;
     
-  #if TESS_USE_TRANSIENTBUILDS
-    // we know the actual part triangles from this dedicated counter
-    counterPart = buildRW.partTriangleCounter;
+  #if TESS_USE_LOWTESS_PARTS
+    // we know the actual part triangles from this dedicated counter,
+    // it was clamped against the information stored at the back of the array
+    counterPart = min(buildRW.partTriangleCounter, buildRW_partTriangleCounterClamped());
   #else
     counterPart = min(counterPart, maxEntriesPart);
     

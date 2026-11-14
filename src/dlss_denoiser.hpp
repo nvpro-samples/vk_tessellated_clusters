@@ -1,0 +1,141 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+
+#pragma once
+
+// This class adds support for DLSS denoising
+// It initialize the NGX and create the G-Buffers for the denoiser
+// It also provides the descriptor set for the denoiser
+
+#include <future>
+
+#include <glm/glm.hpp>
+
+
+#include "../shaders/dlss_util.h"
+
+#include "nvvk/gbuffers.hpp"
+#include "nvvk/resource_allocator.hpp"
+#include "nvvk/sampler_pool.hpp"
+#include "nvutils/parameter_registry.hpp"
+
+// #DLSS
+#include "dlss_wrapper.hpp"
+#include "nvsdk_ngx_helpers_vk.h"
+
+class DlssDenoiser
+{
+public:
+  enum DlssBufferType
+  {
+    eDlssRenderImage     = SHADERIO_eDlssRenderImage,
+    eDlssAlbedo          = SHADERIO_eDlssAlbedo,
+    eDlssSpecAlbedo      = SHADERIO_eDlssSpecAlbedo,
+    eDlssNormalRoughness = SHADERIO_eDlssNormalRoughness,
+    eDlssMotion          = SHADERIO_eDlssMotion,
+    eDlssSpecHitDist     = SHADERIO_eDlssSpecHitDist,
+    eDlssCount,
+  };
+
+  struct InitInfo
+  {
+    VkInstance               instance{};
+    nvvk::ResourceAllocator* resourceAllocator{};
+    uint32_t                 queueFamilyIndex{};
+    // main thread queue, runs the warm-up feature's creation commands
+    VkQueue queue{};
+
+    // optional for UI/imgui
+    nvvk::SamplerPool* samplerPool{};
+    VkDescriptorPool   descriptorPool{};
+  };
+
+  struct Settings
+  {
+    bool enable = false;
+  };
+
+
+  DlssDenoiser()  = default;
+  ~DlssDenoiser() = default;
+
+  void init(const InitInfo& initInfo);
+  void deinit();
+
+  void deinitResources();
+
+  void initDenoiser();
+  // runs initDenoiser on a worker thread, ensureInitialized waits for it
+  void initAsync();
+  bool isInitPending() const { return m_initFuture.valid(); }
+  // completes initAsync if it finished, returns true if so
+  bool pollInit();
+  // Return the descriptor info for the DLSS buffer
+  VkDescriptorImageInfo getDescriptorImageInfo(DlssBufferType name) const;
+
+  // Return if DLSS can be used
+  bool isAvailable() const;
+
+  // Return if the DLSS feature and its resources are ready for evaluation
+  bool isActive() const;
+
+  // When the size of the rendering changes, we need to update the DLSS buffers
+  // also calls setResource for all internal buffers
+  VkExtent2D updateSize(VkCommandBuffer cmd, VkExtent2D size, NVSDK_NGX_PerfQuality_Value quality);
+
+  // To be called externally only for `DlssRayReconstruction::ResourceType::eColorOut`
+  void setResource(DlssRayReconstruction::ResourceType resourceId, VkImage image, VkImageView imageView, VkFormat format);
+
+  // This is the actual denoising call, returns false if nothing was written to the output
+  bool denoise(VkCommandBuffer cmd, glm::vec2 jitter, const glm::mat4& modelView, const glm::mat4& projection, bool reset = false);
+
+  // This is for the debug UI
+  void onUi();
+
+  // Return the render size
+  VkExtent2D getRenderSize() const { return m_dlssGBuffers.getSize(); }
+
+  const nvvk::GBuffer& getGBuffers() const { return m_dlssGBuffers; }
+
+  bool ensureInitialized();
+  bool isInitialized() const { return !m_initFuture.valid() && m_initialized; }
+
+private:
+  void warmupFeature();
+  // main thread, after the init finished
+  void finishWarmup(bool submit);
+
+  InitInfo m_info{};
+  Settings m_settings{};
+  bool     m_initialized  = false;
+  bool     m_hasResources = false;
+  bool     m_dlssCreated  = false;
+
+  std::future<void> m_initFuture;
+
+  // #DLSS - Wrapper for DLSS
+  NgxContext            m_ngx{};
+  DlssRayReconstruction m_dlss{};
+
+  DlssRayReconstruction m_warmup{};
+  VkCommandPool         m_warmupPool{};
+  VkCommandBuffer       m_warmupCmd{};
+
+  std::vector<VkFormat> m_bufferInfos = {
+      {VK_FORMAT_R8G8B8A8_UNORM},       // #DLSS - Rendered image       : eDlssRenderImage
+      {VK_FORMAT_R8G8B8A8_UNORM},       // #DLSS - BaseColor            : eDlssAlbedo
+      {VK_FORMAT_R16G16B16A16_SFLOAT},  // #DLSS - SpecAlbedo           : eDlssSpecAlbedo
+      {VK_FORMAT_R16G16B16A16_SFLOAT},  // #DLSS - Normal / Roughness   : eDlssNormalRoughness
+      {VK_FORMAT_R16G16_SFLOAT},        // #DLSS - Motion vectors       : eDlssMotion
+      {VK_FORMAT_R16_SFLOAT},           // #DLSS - Specular hit distance: eDlssSpecHitDist
+  };
+
+  nvvk::GBuffer m_dlssGBuffers{};  // G-Buffers: for denoising
+  bool          m_dlssSupported = false;
+  VkExtent2D    m_renderingSize{};
+  VkDevice      m_device{};
+  VkSampler     m_sampler{};
+};

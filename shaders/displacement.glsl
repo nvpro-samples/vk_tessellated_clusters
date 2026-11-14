@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /*
 
@@ -103,7 +89,7 @@ vec3 deform_getPN(inout DeformBasePN basis, vec3 bary)
   return pnPos;
 }
 
-vec3 rippleDeform(vec3 originalVertex, uint seed, float geometrySize)
+vec3 rippleDeformAt(vec3 originalVertex, uint seed, float geometrySize, float animationState)
 {
   vec3 newVertex = originalVertex;
 
@@ -111,10 +97,29 @@ vec3 rippleDeform(vec3 originalVertex, uint seed, float geometrySize)
 
   float frequency = view.animationRippleFrequency / geometrySize;
 
-  vec3 wave = vec3(sin(maxCoord * frequency + seed + view.animationState * view.animationRippleSpeed),
-                   cos(maxCoord * frequency * 3 + seed + view.animationState * view.animationRippleSpeed),
-                   sin(maxCoord * frequency * 1.2f + seed + view.animationState * view.animationRippleSpeed));
+  vec3 wave = vec3(sin(maxCoord * frequency + seed + animationState * view.animationRippleSpeed),
+                   cos(maxCoord * frequency * 3 + seed + animationState * view.animationRippleSpeed),
+                   sin(maxCoord * frequency * 1.2f + seed + animationState * view.animationRippleSpeed));
   newVertex += (normalize(originalVertex.zyx)) * (view.animationRippleAmplitude * geometrySize * wave);
   
   return newVertex;
+}
+
+vec3 rippleDeform(vec3 originalVertex, uint seed, float geometrySize)
+{
+  return rippleDeformAt(originalVertex, seed, geometrySize, view.animationState);
+}
+
+// Returns where the rippled vertex was in the previous frame. Its original position is no longer known,
+// two fixed-point iterations recover it well enough to evaluate the ripple at both points in time.
+vec3 rippleDeformPrev(vec3 deformedVertex, uint seed, float geometrySize)
+{
+  vec3 originalVertex = deformedVertex;
+  [[unroll]] for(uint i = 0; i < 2; i++)
+  {
+    originalVertex = deformedVertex - (rippleDeformAt(originalVertex, seed, geometrySize, view.animationState) - originalVertex);
+  }
+
+  return deformedVertex + rippleDeformAt(originalVertex, seed, geometrySize, view.animationStatePrev)
+         - rippleDeformAt(originalVertex, seed, geometrySize, view.animationState);
 }

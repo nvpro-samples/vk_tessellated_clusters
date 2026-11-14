@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #version 460
 
@@ -29,6 +15,7 @@
 #extension GL_EXT_scalar_block_layout : enable
 #extension GL_EXT_shader_atomic_int64 : enable
 #extension GL_EXT_fragment_shader_barycentric : enable
+#extension GL_EXT_control_flow_attributes : require
 
 #include "shaderio.h"
 
@@ -58,6 +45,12 @@ layout(binding = BINDINGS_DISPLACED_TEXTURES) uniform sampler2D[] texturesMap;
 
 ///////////////////////////////////////////////////
 
+#if USE_DLSS
+#include "dlss_util.h"
+#endif
+#if USE_DLSS && DO_ANIMATION
+#include "displacement.glsl"
+#endif
 #include "render_shading.glsl"
 
 ///////////////////////////////////////////////////
@@ -79,6 +72,9 @@ IN;
 ///////////////////////////////////////////////////
 
 layout(location = 0, index = 0) out vec4 out_Color;
+#if USE_DLSS
+layout(location = 1, index = 0) out vec2 out_DlssMotion;
+#endif
 layout(early_fragment_tests) in;
 
 ///////////////////////////////////////////////////
@@ -137,6 +133,17 @@ void main()
   {
     out_Color.xyz = addWireframe(out_Color.xyz, gl_BaryCoordEXT, gl_FrontFacing, fwidthFine(gl_BaryCoordEXT), view.wireColor);
   }
+#endif
+
+#if USE_DLSS && DO_ANIMATION
+  {
+    RenderInstance instance = instances[IN.instanceID];
+    vec3           oPos     = (instance.worldMatrixI * vec4(IN.wPos, 1)).xyz;
+    vec3           wPosPrev = (instance.worldMatrix * vec4(rippleDeformPrev(oPos, IN.instanceID, instance.geoHi.w), 1)).xyz;
+    out_DlssMotion = calculateMotionVector(IN.wPos, wPosPrev, view.viewProjMatrixPrev, view.viewProjMatrix, view.viewportf);
+  }
+#elif USE_DLSS
+  out_DlssMotion = calculateMotionVector(IN.wPos, view.viewProjMatrixPrev, view.viewProjMatrix, view.viewportf);
 #endif
 
   uvec2 pixelCoord = uvec2(gl_FragCoord.xy);

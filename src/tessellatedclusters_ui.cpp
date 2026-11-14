@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include <cstdarg>
 #include <cstdio>
@@ -26,6 +12,7 @@
 #include <imgui/imgui_internal.h>
 #include <implot/implot.h>
 #include <nvgui/camera.hpp>
+#include <nvutils/file_operations.hpp>
 #include <nvgui/sky.hpp>
 #include <nvgui/property_editor.hpp>
 #include <nvgui/window.hpp>
@@ -143,10 +130,10 @@ struct UsagePercentages
     pctPart  = getUsagePct(readback.numPartTriangles, (1ull << rendererConfig.numPartTriangleBits));
     pctSplit = getUsagePct(readback.numSplitTriangles, (1ull << rendererConfig.numSplitTriangleBits));
 
-    pctInst            = getUsagePct(readback.numBlasClusters,
-                                     (1ull << rendererConfig.numVisibleClusterBits) + (1ull << rendererConfig.numPartTriangleBits));
-    pctClusterReserved = getUsagePct(readback.numGenDatas, rendererConfig.numGeneratedClusterMegs * 1024 * 1024);
-    pctClusterActual   = getUsagePct(readback.numGenActualDatas, rendererConfig.numGeneratedClusterMegs * 1024 * 1024);
+    pctInst = getUsagePct(readback.numBlasClusters,
+                          (1ull << rendererConfig.numVisibleClusterBits) + (1ull << rendererConfig.numPartTriangleBits));
+    pctClusterReserved = getUsagePct(readback.numGenDatas, size_t(rendererConfig.numGeneratedClusterMegs) * 1024 * 1024);
+    pctClusterActual = getUsagePct(readback.numGenActualDatas, size_t(rendererConfig.numGeneratedClusterMegs) * 1024 * 1024);
 
     pctVertices = getUsagePct(readback.numGenVertices, 1ull << rendererConfig.numGeneratedVerticesBits);
     pctBlas     = getUsagePct(readback.numBlasActualSizes, std::max(readback.numBlasReservedSizes, 1u));
@@ -175,12 +162,232 @@ struct UsagePercentages
   }
 };
 
-void TessellatedClusters::viewportUI(ImVec2 corner)
+void TessellatedClusters::cameraPathUI()
+{
+  namespace PE = nvgui::PropertyEditor;
+
+  // File: Save / Load the per-scene paths file stored next to the executable
+  const std::filesystem::path pathsFile = sceneCameraPathsFile(m_sceneFilePath);
+  ImGui::TextUnformatted("File:");
+  ImGui::SameLine();
+  ImGui::BeginDisabled(pathsFile.empty());
+  if(ImGui::SmallButton("Save"))
+  {
+    if(saveCameraPaths(pathsFile, m_cameraPaths))
+      LOGI("Saved %zu camera path(s) to %s\n", m_cameraPaths.size(), nvutils::utf8FromPath(pathsFile).c_str());
+    else
+      LOGE("Could not write camera paths to %s\n", nvutils::utf8FromPath(pathsFile).c_str());
+  }
+  ImGui::SameLine();
+  if(ImGui::SmallButton("Load") && loadCameraPaths(pathsFile, m_cameraPaths))
+  {
+    m_cameraPathActive = m_cameraPaths.empty() ? -1 : std::min(std::max(m_cameraPathActive, 0), int(m_cameraPaths.size()) - 1);
+    m_cameraPathEditKey  = -1;
+    m_cameraPathPlayback = CAMERA_PATH_STOP;
+  }
+  ImGui::EndDisabled();
+  if(pathsFile.empty())
+    ImGui::TextDisabled("(load a scene to save/load its paths file)");
+  else
+    ImGui::TextDisabled("%s", nvutils::utf8FromPath(pathsFile.filename()).c_str());
+
+  ImGui::Spacing();
+
+  // Path: New / Delete / Copy / Paste (Copy/Paste exchange the path string via the clipboard)
+  ImGui::TextUnformatted("Path:");
+  ImGui::SameLine();
+  if(ImGui::SmallButton("New##path"))
+  {
+    m_cameraPaths.emplace_back();
+    m_cameraPathActive   = int(m_cameraPaths.size()) - 1;
+    m_cameraPathEditKey  = -1;
+    m_cameraPathPlayback = CAMERA_PATH_STOP;
+  }
+  ImGui::SameLine();
+  ImGui::BeginDisabled(m_cameraPathActive < 0 || m_cameraPathActive >= int(m_cameraPaths.size()));
+  if(ImGui::SmallButton("Delete##path"))
+  {
+    m_cameraPaths.erase(m_cameraPaths.begin() + m_cameraPathActive);
+    m_cameraPathActive   = m_cameraPaths.empty() ? -1 : std::min(m_cameraPathActive, int(m_cameraPaths.size()) - 1);
+    m_cameraPathEditKey  = -1;
+    m_cameraPathPlayback = CAMERA_PATH_STOP;
+  }
+  ImGui::SameLine();
+  if(ImGui::SmallButton("Copy") && m_cameraPathActive >= 0 && m_cameraPathActive < int(m_cameraPaths.size()))
+    ImGui::SetClipboardText(m_cameraPaths[m_cameraPathActive].getString().c_str());
+  ImGui::EndDisabled();
+  ImGui::SameLine();
+  if(ImGui::SmallButton("Paste"))
+  {
+    const char* clip = ImGui::GetClipboardText();
+    CameraPath  pasted;
+    if(clip && pasted.setFromString(clip))
+    {
+      m_cameraPaths.push_back(std::move(pasted));
+      m_cameraPathActive   = int(m_cameraPaths.size()) - 1;
+      m_cameraPathEditKey  = -1;
+      m_cameraPathPlayback = CAMERA_PATH_STOP;
+    }
+  }
+
+  // active path selector
+  {
+    std::string preview = (m_cameraPathActive >= 0 && m_cameraPathActive < int(m_cameraPaths.size())) ?
+                              fmt::format("Path {} ({} keys)", m_cameraPathActive, m_cameraPaths[m_cameraPathActive].size()) :
+                              std::string("<none>");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if(ImGui::BeginCombo("##camerapathsel", preview.c_str()))
+    {
+      for(int i = 0; i < int(m_cameraPaths.size()); i++)
+      {
+        if(ImGui::Selectable(fmt::format("Path {} ({} keys)", i, m_cameraPaths[i].size()).c_str(), i == m_cameraPathActive))
+        {
+          m_cameraPathActive   = i;
+          m_cameraPathEditKey  = -1;
+          m_cameraPathPlayback = CAMERA_PATH_STOP;
+          m_cameraPathU        = 0.0;
+        }
+      }
+      ImGui::EndCombo();
+    }
+  }
+
+  const bool hasPath = m_cameraPathActive >= 0 && m_cameraPathActive < int(m_cameraPaths.size());
+  const nvutils::CameraManipulator::Camera& cam = m_info.cameraManipulator->getCamera();
+
+  // Key: New / Update / Delete (captured from the current camera)
+  ImGui::TextUnformatted("Key:");
+  ImGui::SameLine();
+  ImGui::BeginDisabled(!hasPath);
+  if(ImGui::SmallButton("New##key") && hasPath)
+  {
+    CameraPath& keyPath = m_cameraPaths[m_cameraPathActive];
+    int insertAt = (m_cameraPathEditKey >= 0 && m_cameraPathEditKey < int(keyPath.keys.size())) ? m_cameraPathEditKey + 1 :
+                                                                                                  int(keyPath.keys.size());
+    keyPath.keys.insert(keyPath.keys.begin() + insertAt, CameraPathKey{cam.eye, cam.ctr, cam.up, cam.fov});
+    m_cameraPathEditKey = insertAt;
+  }
+  ImGui::SameLine();
+  if(ImGui::SmallButton("Update##key") && hasPath && m_cameraPathEditKey >= 0
+     && m_cameraPathEditKey < int(m_cameraPaths[m_cameraPathActive].keys.size()))
+  {
+    m_cameraPaths[m_cameraPathActive].keys[m_cameraPathEditKey] = CameraPathKey{cam.eye, cam.ctr, cam.up, cam.fov};
+  }
+  ImGui::SameLine();
+  if(ImGui::SmallButton("Delete##key") && hasPath && m_cameraPathEditKey >= 0
+     && m_cameraPathEditKey < int(m_cameraPaths[m_cameraPathActive].keys.size()))
+  {
+    CameraPath& keyPath = m_cameraPaths[m_cameraPathActive];
+    keyPath.keys.erase(keyPath.keys.begin() + m_cameraPathEditKey);
+    m_cameraPathEditKey = std::min(m_cameraPathEditKey, int(keyPath.keys.size()) - 1);
+  }
+  ImGui::EndDisabled();
+
+  // keyframe list (always shown, even when empty; selecting previews the camera)
+  if(ImGui::BeginListBox("##keys", ImVec2(-FLT_MIN, ImGui::GetTextLineHeightWithSpacing() * 4.5f)))
+  {
+    if(hasPath)
+    {
+      const CameraPath& selPath = m_cameraPaths[m_cameraPathActive];
+      for(int i = 0; i < int(selPath.keys.size()); i++)
+      {
+        const CameraPathKey& k = selPath.keys[i];
+        if(ImGui::Selectable(
+               fmt::format("{:2d}: eye {:.1f} {:.1f} {:.1f}  fov {:.0f}", i, k.eye.x, k.eye.y, k.eye.z, k.fov).c_str(),
+               i == m_cameraPathEditKey))
+        {
+          m_cameraPathEditKey                  = i;
+          m_cameraPathPlayback                 = CAMERA_PATH_STOP;
+          nvutils::CameraManipulator::Camera c = cam;
+          c.eye = k.eye, c.ctr = k.ctr, c.up = k.up, c.fov = k.fov;
+          m_info.cameraManipulator->setCamera(c, false);  // animate for a nicer preview
+        }
+      }
+    }
+    ImGui::EndListBox();
+  }
+
+  if(!hasPath)
+    return;
+
+  CameraPath& path = m_cameraPaths[m_cameraPathActive];
+
+  PE::begin("camerapath", ImGuiTableFlags_Resizable);
+  PE::Checkbox("Smooth", &path.smooth, "Catmull-Rom interpolation, otherwise piecewise linear");
+  PE::Checkbox("Loop", &path.loop, "Real-time playback wraps around");
+  {
+    float dur = float(path.duration);
+    if(PE::InputFloat("Duration (s)", &dur, 0.1f, 1.0f, "%.2f", 0, "Seconds for a full real-time playback"))
+      path.duration = std::max(double(dur), 0.0);
+  }
+  PE::end();
+
+  // real-time playback + scrub
+  const bool active = m_cameraPathPlayback != CAMERA_PATH_STOP;
+  if(ImGui::Button(active ? "Stop" : "Play"))
+  {
+    if(active)
+    {
+      m_cameraPathPlayback = CAMERA_PATH_STOP;
+    }
+    else
+    {
+      m_cameraPathPlayback = CAMERA_PATH_REALTIME;
+      m_cameraPathStarted  = false;
+      if(m_cameraPathU >= 1.0)
+        m_cameraPathU = 0.0;
+    }
+  }
+  ImGui::SameLine();
+  if(ImGui::Button("Restart"))
+  {
+    m_cameraPathU       = 0.0;
+    m_cameraPathStarted = false;
+  }
+  ImGui::SameLine();
+  {
+    float u = float(m_cameraPathU);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if(ImGui::SliderFloat("##scrub", &u, 0.0f, 1.0f, "t = %.3f"))
+    {
+      m_cameraPathU        = u;
+      m_cameraPathPlayback = CAMERA_PATH_STOP;
+      applyCameraPathSample(m_cameraPathU);
+    }
+  }
+
+  // deterministic (fixed-step) playback, same behaviour as --runcamerapath
+  PE::begin("camerapathfixed", ImGuiTableFlags_Resizable);
+  PE::InputInt("Fixed frames", &m_cameraPathFrames, 1, 16, 0,
+               "Number of frames for a full fixed-step (deterministic) traversal, as used by --runcamerapath");
+  PE::end();
+  m_cameraPathFrames = std::max(m_cameraPathFrames, 1);
+  if(ImGui::Button("Run fixed"))
+  {
+    m_cameraPathFrame    = 0;
+    m_cameraPathPlayback = CAMERA_PATH_FIXED;
+  }
+  ImGui::SameLine();
+  if(m_cameraPathPlayback == CAMERA_PATH_FIXED)
+    ImGui::Text("frame %d / %d", m_cameraPathFrame, m_cameraPathFrames);
+  else
+    ImGui::TextDisabled("cmd: --runcamerapath %d %d", m_cameraPathActive, m_cameraPathFrames);
+}
+
+void TessellatedClusters::viewportUI(ImVec2 corner, ImVec2 imageSize)
 {
   ImVec2     mouseAbsPos = ImGui::GetMousePos();
-  glm::uvec2 mousePos    = {mouseAbsPos.x - corner.x, mouseAbsPos.y - corner.y};
+  glm::uvec2 mousePos    = {std::max(mouseAbsPos.x - corner.x, 0.0f), std::max(mouseAbsPos.y - corner.y, 0.0f)};
 
-  m_frameConfig.frameConstants.mousePosition = mousePos * glm::uvec2(m_tweak.supersample, m_tweak.supersample);
+  {
+    const Resources::FrameBuffer& fb = m_resources.m_frameBuffer;
+    // fixed resolutions are letterboxed, so map through the displayed rect
+    glm::vec2  scale                           = fb.fixedSize ?
+                                                     glm::vec2(fb.renderSize.width, fb.renderSize.height) / glm::vec2(imageSize.x, imageSize.y) :
+                                                     m_resources.getFramebufferWindow2RenderScale();
+    glm::uvec2 maxPos                          = {fb.renderSize.width - 1, fb.renderSize.height - 1};
+    m_frameConfig.frameConstants.mousePosition = glm::min(glm::uvec2(glm::vec2(mousePos) * scale), maxPos);
+  }
 
   if(m_renderer)
   {
@@ -250,19 +457,18 @@ void TessellatedClusters::onUIRender()
   if(m_requestCameraRecenter && isPickingValid(readback))
   {
 
-    glm::uvec2 mousePos = {m_frameConfig.frameConstants.mousePosition.x / m_tweak.supersample,
-                           m_frameConfig.frameConstants.mousePosition.y / m_tweak.supersample};
+    // render pixels, which also holds for letterboxed fixed resolutions
+    glm::vec2 mousePos = glm::vec2(m_frameConfig.frameConstants.mousePosition);
 
     const glm::mat4 view = m_info.cameraManipulator->getViewMatrix();
     const glm::mat4 proj = m_frameConfig.frameConstants.projMatrix;
 
     float d = decodePickingDepth(readback);
 
-    if(d < 1.0F)  // Ignore infinite
+    if(d > 0.0F)  // Ignore infinite
     {
-      glm::vec4       win_norm = {0, 0, m_frameConfig.frameConstants.viewport.x / m_tweak.supersample,
-                                  m_frameConfig.frameConstants.viewport.y / m_tweak.supersample};
-      const glm::vec3 hitPos   = glm::unProjectZO({mousePos.x, mousePos.y, d}, view, proj, win_norm);
+      glm::vec4 win_norm = {0, 0, m_resources.m_frameBuffer.renderSize.width, m_resources.m_frameBuffer.renderSize.height};
+      const glm::vec3 hitPos = glm::unProjectZO({mousePos.x, mousePos.y, d}, view, proj, win_norm);
 
       // Set the interest position
       glm::dvec3 eye, center, up;
@@ -305,7 +511,61 @@ void TessellatedClusters::onUIRender()
   {
     PE::begin("##Rendering");
     PE::entry("Renderer", [&]() { return m_ui.enumCombobox(GUI_RENDERER, "renderer", &m_tweak.renderer); });
-    PE::entry("Super sampling", [&]() { return m_ui.enumCombobox(GUI_SUPERSAMPLE, "##HiddenID", &m_tweak.supersample); });
+    PE::entry("Super sampling",
+              [&]() { return m_ui.enumCombobox(GUI_SUPERSAMPLE, "##Supersample", &m_tweak.supersample); });
+#if USE_DLSS
+    bool        dlssAvailable = false;
+    const char* dlssLabel     = "DLSS";
+    if(m_tweak.renderer == RENDERER_RAYTRACE_CLUSTERS_TESS)
+    {
+      // NGX is only initialized once DLSS is requested
+      dlssAvailable = !m_resources.m_frameBuffer.dlssDenoiser.isInitialized()
+                      || m_resources.m_frameBuffer.dlssDenoiser.isAvailable();
+      dlssLabel = "DLSS - RR";
+    }
+    else if(m_tweak.renderer == RENDERER_RASTER_CLUSTERS_TESS)
+    {
+      dlssAvailable = !m_resources.m_frameBuffer.dlssUpscaler.isInitialized()
+                      || m_resources.m_frameBuffer.dlssUpscaler.isAvailable();
+      dlssLabel = "DLSS - SR";
+    }
+    // no changes while NGX loads in the background, DLSS is switched on once done
+    const bool  dlssLoading = m_resources.isDlssLoading();
+    std::string dlssEntry   = dlssLoading ? fmt::format("{} (loading)", dlssLabel) : dlssLabel;
+    ImGui::BeginDisabled(!dlssAvailable || dlssLoading);
+    {
+      PE::entry(dlssEntry, [&]() {
+        bool changed = ImGui::Checkbox("Enabled", &m_rendererConfig.useDlss);
+        ImGui::SameLine();
+
+        const char* labels[] = {"DLAA", "Quality", "Balanced", "Performance", "Ultra Performance"};
+        const NVSDK_NGX_PerfQuality_Value values[] = {
+            NVSDK_NGX_PerfQuality_Value_DLAA,
+            NVSDK_NGX_PerfQuality_Value_MaxQuality,
+            NVSDK_NGX_PerfQuality_Value_Balanced,
+            NVSDK_NGX_PerfQuality_Value_MaxPerf,
+            NVSDK_NGX_PerfQuality_Value_UltraPerformance,
+        };
+
+        int current = 1;
+        for(int i = 0; i < IM_ARRAYSIZE(values); i++)
+        {
+          if(m_rendererConfig.dlssQuality == values[i])
+          {
+            current = i;
+            break;
+          }
+        }
+        if(ImGui::Combo("Quality", &current, labels, IM_ARRAYSIZE(labels)))
+        {
+          m_rendererConfig.dlssQuality = values[current];
+          changed                      = true;
+        }
+        return changed;
+      });
+    }
+    ImGui::EndDisabled();
+#endif
     PE::Text("Render Resolution:", "%d x %d", m_resources.m_frameBuffer.renderSize.width,
              m_resources.m_frameBuffer.renderSize.height);
 
@@ -327,9 +587,10 @@ void TessellatedClusters::onUIRender()
       PE::Checkbox("Ambient occlusion (HBAO)", &m_tweak.hbaoActive);
       if(PE::treeNode("HBAO settings"))
       {
-        PE::Checkbox("Full resolution", &m_tweak.hbaoFullRes);
+        PE::Checkbox("Blur", &m_frameConfig.hbaoSettings.blur);
+        PE::Checkbox("Quarter resolution", &m_tweak.hbaoQuarter, "Half width and height, upsampled depth-aware");
         PE::InputFloat("Radius", &m_tweak.hbaoRadius, 0.01f);
-        PE::InputFloat("Blur sharpness", &m_frameConfig.hbaoSettings.blurSharpness, 1.0f);
+        PE::InputFloat("Sharpness", &m_frameConfig.hbaoSettings.powerExponent, 1.0f);
         PE::InputFloat("Intensity", &m_frameConfig.hbaoSettings.intensity, 0.1f);
         PE::InputFloat("Bias", &m_frameConfig.hbaoSettings.bias, 0.01f);
         PE::treePop();
@@ -350,6 +611,8 @@ void TessellatedClusters::onUIRender()
     PE::Checkbox("Culling (Occlusion & Frustum)", &m_rendererConfig.doCulling);
 
     PE::Checkbox("Freeze Cull / LoD", &m_frameConfig.freezeCulling);
+    PE::Checkbox("Render statistics", &m_rendererConfig.useRenderStats,
+                 "Adds additional atomic counters for statistics, impacts performance");
     PE::end();
 
     if(ImGui::BeginTable("Rendering stats", 3, ImGuiTableFlags_BordersOuter))
@@ -366,13 +629,16 @@ void TessellatedClusters::onUIRender()
                          formatMetric(readback.numVisibleClusters).c_str(), pct.pctVisible);
       ImGui::TableNextColumn();
       ImGui::TextColored(pct.pctVisible > 100 ? warnColor : textColor, "%d", readback.numVisibleClusters);
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::Text("Rendered triangles");
-      ImGui::TableNextColumn();
-      ImGui::Text("%s", formatMetric(readback.numTotalTriangles).c_str());
-      ImGui::TableNextColumn();
-      ImGui::Text("%d", readback.numTotalTriangles);
+      if(m_rendererConfig.useRenderStats)
+      {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::Text("Rendered triangles");
+        ImGui::TableNextColumn();
+        ImGui::Text("%s", formatMetric(readback.numTotalTriangles).c_str());
+        ImGui::TableNextColumn();
+        ImGui::Text("%d", readback.numTotalTriangles);
+      }
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
       ImGui::Text("Rendered clusters");
@@ -380,13 +646,16 @@ void TessellatedClusters::onUIRender()
       ImGui::Text("%s", formatMetric(readback.numBlasClusters).c_str());
       ImGui::TableNextColumn();
       ImGui::Text("%d", readback.numBlasClusters);
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::Text("Rendered tri/cluster");
-      ImGui::TableNextColumn();
-      ImGui::Text("%.1f", float(readback.numTotalTriangles) / float(readback.numBlasClusters));
-      ImGui::TableNextColumn();
-      ImGui::Text("%s", "");
+      if(m_rendererConfig.useRenderStats)
+      {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::Text("Rendered tri/cluster");
+        ImGui::TableNextColumn();
+        ImGui::Text("%.1f", float(readback.numTotalTriangles) / float(readback.numBlasClusters));
+        ImGui::TableNextColumn();
+        ImGui::Text("%s", "");
+      }
       ImGui::TableNextRow();
       ImGui::EndTable();
     }
@@ -397,6 +666,10 @@ void TessellatedClusters::onUIRender()
   {
     PE::begin("##Rasterization");
     PE::Checkbox("Batch meshlets", &m_rendererConfig.rasterBatchMeshlets);
+    ImGui::BeginDisabled(!m_resources.m_supportsMeshShaderNV);
+    PE::Checkbox("Use EXT mesh shader", &m_rendererConfig.useEXTmeshShader,
+                 "Use VK_EXT_mesh_shader instead of VK_NV_mesh_shader, forced on without NV support.");
+    ImGui::EndDisabled();
     PE::end();
   }
 
@@ -404,8 +677,23 @@ void TessellatedClusters::onUIRender()
      && ImGui::CollapsingHeader("Ray Tracing", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
   {
     PE::begin("##Raytracing");
-    PE::Checkbox("Use transient == 1x1x1", &m_rendererConfig.transientClusters1X);
-    PE::Checkbox("Use transient <= 2x2x2", &m_rendererConfig.transientClusters2X);
+    PE::entry(
+        "Low tessellation mode",
+        [&]() { return m_ui.enumCombobox(GUI_LOWTESSMODE, "##LowTessMode", &m_rendererConfig.lowTessMode); },
+        "How clusters/triangles with low tessellation factors are turned into CLAS.\n"
+        "Transient builds create a CLAS from scratch, combined templates instantiate\n"
+        "pre-built templates that store a batch of independent triangles / 2x2x2 patches.");
+    PE::Checkbox("Optimize == 1x1x1", &m_rendererConfig.lowTessClusters1X);
+    PE::Checkbox("Optimize <= 2x2x2", &m_rendererConfig.lowTessClusters2X);
+    if(m_rendererConfig.lowTessMode == LOWTESS_MODE_COMBINED_TEMPLATES)
+    {
+      PE::InputIntClamped("Combined 1x1x1 batch size", (int*)&m_rendererConfig.combined1xBatchSize, 1, 85, 1, 8,
+                          ImGuiInputTextFlags_EnterReturnsTrue,
+                          "Number of independent triangles a combined template stores at most.");
+      PE::InputIntClamped("Combined 2x2x2 batch size", (int*)&m_rendererConfig.combined2xBatchSize, 1, 32, 1, 2,
+                          ImGuiInputTextFlags_EnterReturnsTrue,
+                          "Number of independent 2x2x2 patches a combined template stores at most (rounded down to a power of two).");
+    }
     PE::InputIntClamped("Max CLAS data in MB", (int*)&m_rendererConfig.numGeneratedClusterMegs, 16, 3 * 1024, 16, 128,
                         ImGuiInputTextFlags_EnterReturnsTrue);
     PE::InputIntClamped("Max CLAS vertices in bits", (int*)&m_rendererConfig.numGeneratedVerticesBits, 15, 27, 1, 1,
@@ -474,13 +762,17 @@ void TessellatedClusters::onUIRender()
       ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableSetupColumn("Percentage", ImGuiTableColumnFlags_WidthStretch);
       //ImGui::TableHeadersRow(); // we do not show the header, it is not visually usefull
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::Text("Full clusters");
-      ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctFull > 100 ? warnColor : textColor, "%d", readback.numFullClusters);
-      ImGui::TableNextColumn();
-      ImGui::TextColored(pct.pctFull > 100 ? warnColor : textColor, "%d%%", pct.pctFull);
+      // ray tracing only counts full clusters as part of the render stats
+      if(m_tweak.renderer != RENDERER_RAYTRACE_CLUSTERS_TESS || m_rendererConfig.useRenderStats)
+      {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::Text("Full clusters");
+        ImGui::TableNextColumn();
+        ImGui::TextColored(pct.pctFull > 100 ? warnColor : textColor, "%d", readback.numFullClusters);
+        ImGui::TableNextColumn();
+        ImGui::TextColored(pct.pctFull > 100 ? warnColor : textColor, "%d%%", pct.pctFull);
+      }
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
       ImGui::Text("Part triangles");
@@ -531,12 +823,12 @@ void TessellatedClusters::onUIRender()
   {
     PE::begin("##Clusters");
     PE::entry("Cluster/meshlet size",
-              [&]() { return m_ui.enumCombobox(GUI_MESHLET, "##HiddenID", &m_tweak.clusterConfig); });
+              [&]() { return m_ui.enumCombobox(GUI_MESHLET, "##ClusterSize", &m_tweak.clusterConfig); });
     PE::InputIntClamped("CLAS Mantissa drop bits", (int*)&m_rendererConfig.positionTruncateBits, 0, 22, 1, 1,
                         ImGuiInputTextFlags_EnterReturnsTrue);
     PE::entry(
         "Transient CLAS build mode",
-        [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##HiddenID", &m_tweak.clusterBuildMode); }, "Transient CLAS build mode");
+        [&]() { return m_ui.enumCombobox(GUI_BUILDMODE, "##BuildMode", &m_tweak.clusterBuildMode); }, "Transient CLAS build mode");
     PE::end();
   }
 
@@ -694,6 +986,10 @@ void TessellatedClusters::onUIRender()
   {
     nvgui::CameraWidget(m_info.cameraManipulator);
   }
+  if(ImGui::CollapsingHeader("Camera Paths", nullptr))
+  {
+    cameraPathUI();
+  }
 
   if(ImGui::CollapsingHeader("Lighting", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
   {
@@ -713,7 +1009,7 @@ void TessellatedClusters::onUIRender()
     ImGui::Begin("Debug");
     if(ImGui::CollapsingHeader("Misc settings", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
     {
-      PE::begin("##HiddenID");
+      PE::begin("##DebugMisc");
       PE::InputInt("Colorize xor", (int*)&m_frameConfig.frameConstants.colorXor);
       PE::Checkbox("Auto reset timer", &m_tweak.autoResetTimers);
       PE::InputInt("Persistent threads", (int*)&m_rendererConfig.persistentThreads, 1, 128, ImGuiInputTextFlags_EnterReturnsTrue);
@@ -722,7 +1018,7 @@ void TessellatedClusters::onUIRender()
 
     if(ImGui::CollapsingHeader("Debug Shader Values", nullptr, ImGuiTreeNodeFlags_DefaultOpen))
     {
-      PE::begin("##HiddenID");
+      PE::begin("##DebugShader");
       PE::InputInt("dbgInt", (int*)&m_frameConfig.frameConstants.dbgUint, 1, 100, ImGuiInputTextFlags_EnterReturnsTrue);
       PE::InputFloat("dbgFloat", &m_frameConfig.frameConstants.dbgFloat, 0.1f, 1.0f, "%.3f", ImGuiInputTextFlags_EnterReturnsTrue);
       PE::end();
@@ -861,9 +1157,21 @@ void TessellatedClusters::onUIRender()
 
   // Rendered image displayed fully in 'Viewport' window
   ImGui::Begin("Viewport");
-  ImVec2 corner = ImGui::GetCursorScreenPos();  // Corner of the viewport
-  ImGui::Image((ImTextureID)m_imguiTexture, ImGui::GetContentRegionAvail());
-  viewportUI(corner);
+  ImVec2                        corner    = ImGui::GetCursorScreenPos();  // Corner of the viewport
+  ImVec2                        avail     = ImGui::GetContentRegionAvail();
+  ImVec2                        imageSize = avail;
+  const Resources::FrameBuffer& fb        = m_resources.m_frameBuffer;
+  if(fb.fixedSize && fb.targetSize.width && fb.targetSize.height)
+  {
+    // fixed resolution: fit its aspect into the viewport, centered
+    float scale = std::min(avail.x / float(fb.targetSize.width), avail.y / float(fb.targetSize.height));
+    imageSize   = {float(fb.targetSize.width) * scale, float(fb.targetSize.height) * scale};
+    corner.x += std::max(0.0f, (avail.x - imageSize.x) * 0.5f);
+    corner.y += std::max(0.0f, (avail.y - imageSize.y) * 0.5f);
+    ImGui::SetCursorScreenPos(corner);
+  }
+  ImGui::Image((ImTextureID)m_imguiTexture, imageSize);
+  viewportUI(corner, imageSize);
   ImGui::End();
 }
 

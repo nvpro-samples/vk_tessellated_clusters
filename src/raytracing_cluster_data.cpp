@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include <volk.h>
 
@@ -63,7 +49,8 @@ void RayTracingClusterData::initRayTracingTemplates(Resources& res, Scene& scene
 
   nvvk::Buffer scratchBuffer;
   res.m_allocator.createBuffer(scratchBuffer, tempScratchSize,
-                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+                               VMA_MEMORY_USAGE_AUTO, {}, m_scratchAlignment);
 
   std::vector<VkClusterAccelerationStructureBuildTriangleClusterTemplateInfoNV> templateInfos(scene.m_maxPerGeometryClusters);
   std::vector<VkClusterAccelerationStructureInstantiateClusterInfoNV> instantiateInfos(scene.m_maxPerGeometryClusters);
@@ -298,13 +285,15 @@ void RayTracingClusterData::initRayTracingInstantiations(Resources& res, Scene& 
   }
 }
 
-bool RayTracingClusterData::init(Resources& res, Scene& scene, const RendererConfig& config, TessellationTable* tessTable)
+bool RayTracingClusterData::init(Resources& res, Scene& scene, const RendererConfig& config, TessellationTable* tessTable, uint32_t transient2xBatchSize)
 {
   VkPhysicalDeviceProperties2                              props2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
   VkPhysicalDeviceClusterAccelerationStructurePropertiesNV clusterProps = {
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CLUSTER_ACCELERATION_STRUCTURE_PROPERTIES_NV};
   props2.pNext = &clusterProps;
   vkGetPhysicalDeviceProperties2(res.m_physicalDevice, &props2);
+
+  m_scratchAlignment = clusterProps.clusterScratchByteAlignment;
 
   // used for cluster builds or instantiations
   // which do entire scene at once
@@ -325,7 +314,21 @@ bool RayTracingClusterData::init(Resources& res, Scene& scene, const RendererCon
     m_clusterTriangleInput.maxClusterTriangleCount =
         std::max(m_clusterTriangleInput.maxClusterTriangleCount, tessTable->m_maxTriangles);
     m_clusterTriangleInput.maxClusterVertexCount = std::max(m_clusterTriangleInput.maxClusterVertexCount, tessTable->m_maxVertices);
+
+    // the combined templates can be bigger than a scene cluster or a tessellation table entry
+    m_clusterTriangleInput.maxClusterTriangleCount =
+        std::max(m_clusterTriangleInput.maxClusterTriangleCount, tessTable->m_combinedMaxTriangles);
+    m_clusterTriangleInput.maxClusterVertexCount =
+        std::max(m_clusterTriangleInput.maxClusterVertexCount, tessTable->m_combinedMaxVertices);
   }
+
+  // same for the batches of the transient builds
+  m_transient2xBatchTriangles = transient2xBatchSize * TESS_2X_TRIANGLES;
+  m_transient2xBatchVertices  = transient2xBatchSize * TESS_2X_VERTICES;
+
+  m_clusterTriangleInput.maxClusterTriangleCount =
+      std::max(m_clusterTriangleInput.maxClusterTriangleCount, m_transient2xBatchTriangles);
+  m_clusterTriangleInput.maxClusterVertexCount = std::max(m_clusterTriangleInput.maxClusterVertexCount, m_transient2xBatchVertices);
 
   m_clusterTriangleInput.maxTotalVertexCount   = (1u << config.numGeneratedVerticesBits);
   m_clusterTriangleInput.maxTotalTriangleCount = m_numTotalClusters * m_clusterTriangleInput.maxClusterTriangleCount;
@@ -334,45 +337,69 @@ bool RayTracingClusterData::init(Resources& res, Scene& scene, const RendererCon
   initRayTracingInstantiations(res, scene, config);
   initRayTracingBlas(res, scene, config, tessTable ? m_numTotalClusters : scene.m_maxPerGeometryClusters);
 
+  // The per-frame CLAS instantiations and transient CLAS builds are not separated by a barrier and may overlap,
+  // hence each uses its own scratch range. The BLAS build comes after a barrier and re-uses the buffer's start.
+  // Query with the same explicit mode that the per-frame operations use.
+  VkDeviceSize instantiateScratchSize;
+  {
+    VkClusterAccelerationStructureInputInfoNV inputs = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV};
+    inputs.maxAccelerationStructureCount             = m_numTotalClusters;
+    inputs.opType                    = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_INSTANTIATE_TRIANGLE_CLUSTER_NV;
+    inputs.opMode                    = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_EXPLICIT_DESTINATIONS_NV;
+    inputs.opInput.pTriangleClusters = &m_clusterTriangleInput;
+    inputs.flags                     = config.templateInstantiateFlags;
+    VkAccelerationStructureBuildSizesInfoKHR sizesInfo = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    vkGetClusterAccelerationStructureBuildSizesNV(res.m_device, &inputs, &sizesInfo);
+
+    instantiateScratchSize = sizesInfo.buildScratchSize;
+  }
+
+  VkDeviceSize scratchBufferSize = std::max(m_scratchSize, instantiateScratchSize);
+  if(config.useTransientBuilds())
   {
     VkClusterAccelerationStructureInputInfoNV inputs = {VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_INPUT_INFO_NV};
     inputs.maxAccelerationStructureCount             = m_numTotalClusters;
     inputs.opType                    = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_TYPE_BUILD_TRIANGLE_CLUSTER_NV;
-    inputs.opMode                    = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_IMPLICIT_DESTINATIONS_NV;
+    inputs.opMode                    = VK_CLUSTER_ACCELERATION_STRUCTURE_OP_MODE_EXPLICIT_DESTINATIONS_NV;
     inputs.opInput.pTriangleClusters = &m_clusterTriangleInput;
     inputs.flags                     = config.clusterBuildFlags;
     VkAccelerationStructureBuildSizesInfoKHR sizesInfo = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     vkGetClusterAccelerationStructureBuildSizesNV(res.m_device, &inputs, &sizesInfo);
 
-    m_scratchSize = std::max(m_scratchSize, sizesInfo.buildScratchSize);
+    m_scratchTransientOffset = nvutils::align_up(instantiateScratchSize, m_scratchAlignment);
+    scratchBufferSize        = std::max(scratchBufferSize, m_scratchTransientOffset + sizesInfo.buildScratchSize);
   }
 
-  VkDeviceSize scratchBufferActualSize = m_scratchSize;
-  if(config.transientClusters1X || m_config.transientClusters2X)
-  {
-    // we overlap two operations when building transient clusters, ensure m_scratchSize is properly aligned
-    m_scratchSize = nvutils::align_up(m_scratchSize, VkDeviceSize(clusterProps.clusterScratchByteAlignment));
-    // and then double the size we request (this is very conservative)
-    scratchBufferActualSize = m_scratchSize * 2;
-  }
-
-  res.m_allocator.createBuffer(m_scratchBuffer, scratchBufferActualSize,
+  res.m_allocator.createBuffer(m_scratchBuffer, scratchBufferSize,
                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-                                   | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+                                   | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                               VMA_MEMORY_USAGE_AUTO, {}, m_scratchAlignment);
   m_resourceUsageInfo.operationsMemBytes += m_scratchBuffer.bufferSize;
 
+  if(config.useTransientBuilds())
   {
-    m_maxClusterSizes.resize(scene.m_config.clusterTriangles + 1, 0);
+    // The transient builds look up their worst-case size by the number of triangles they will
+    // contain. The "1x" builds stay within a scene cluster, but a "2x" batch can be bigger than
+    // that, hence the table has to cover the batch as well.
+    const uint32_t maxSizeTriangles = std::max(scene.m_config.clusterTriangles, m_transient2xBatchTriangles);
 
-    for(uint32_t t = 1; t <= scene.m_config.clusterTriangles; t++)
+    m_maxClusterSizes.resize(maxSizeTriangles + 1, 0);
+
+    for(uint32_t t = 1; t <= maxSizeTriangles; t++)
     {
+      // A "1x" build re-uses the cluster's vertices, a "2x" batch needs
+      // TESS_2X_VERTICES per TESS_2X_TRIANGLES. Take whichever is worse, otherwise we would
+      // under-estimate the size and the CLAS would not fit into what we reserved for it.
+      uint32_t maxVertices =
+          std::max(scene.m_maxClusterVertices, (t * TESS_2X_VERTICES + TESS_2X_TRIANGLES - 1) / TESS_2X_TRIANGLES);
+
       VkClusterAccelerationStructureTriangleClusterInputNV triangleInput = {
           VK_STRUCTURE_TYPE_CLUSTER_ACCELERATION_STRUCTURE_TRIANGLE_CLUSTER_INPUT_NV};
       triangleInput.vertexFormat                  = VK_FORMAT_R32G32B32_SFLOAT;
       triangleInput.maxClusterTriangleCount       = t;
-      triangleInput.maxClusterVertexCount         = scene.m_maxClusterTriangles;
+      triangleInput.maxClusterVertexCount         = maxVertices;
       triangleInput.maxTotalTriangleCount         = t;
-      triangleInput.maxTotalVertexCount           = scene.m_maxClusterVertices;
+      triangleInput.maxTotalVertexCount           = maxVertices;
       triangleInput.minPositionTruncateBitCount   = config.positionTruncateBits;
       triangleInput.maxClusterUniqueGeometryCount = 1;
 

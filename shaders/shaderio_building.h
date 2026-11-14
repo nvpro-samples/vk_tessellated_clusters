@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #ifndef _SHADERIO_BUILDING_H_
 #define _SHADERIO_BUILDING_H_
 
@@ -192,7 +178,7 @@ struct SceneBuilding
   // triangle to be split recursively (subdivision too big)
   BUFFER_REF(TessTriangleInfos_coh_volatile) splitTriangles;
   // sub-triangle to be rendered (subdivision fits in table)
-  // or for transient builds the end of array contains meta information for triangle remapping as well
+  // or for the low tessellation optimizations the end of the array contains their triangle remapping as well
   BUFFER_REF(TessTriangleInfos_inout) partTriangles;
 
   // rasterization related
@@ -200,6 +186,9 @@ struct SceneBuilding
 
   DrawMeshTasksIndirectCommandNV drawFullClusters;
   DrawMeshTasksIndirectCommandNV drawPartTriangles;
+
+  DrawMeshTasksIndirectCommandEXT drawFullClustersEXT;
+  DrawMeshTasksIndirectCommandEXT drawPartTrianglesEXT;
 
   // ray tracing focused
   //////////////////////////////////////////////////
@@ -243,10 +232,10 @@ struct SceneBuilding
   BUFFER_REF(uint64s_inout) transClusterAddresses;
   BUFFER_REF(uint32s_inout) transClusterSizes;
 
-  // transient clusters contain a subset of the original cluster triangles,
-  // need to map back the triangleID.
+  // the low tessellation optimizations reference a subset of the
+  // original cluster triangles, need to map back the triangleID.
   // aliases with partTriangles, needed at render time
-  BUFFER_REF(uint8s_inout) transTriMappings;
+  BUFFER_REF(uint8s_inout) lowtessTriMappings;
   // transient clusters also need have triangle index buffers for CLAS building
   // aliases with genVertices
   BUFFER_REF(uint8s_inout) transTriIndices;

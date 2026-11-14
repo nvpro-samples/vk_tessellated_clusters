@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /*
   
@@ -45,7 +31,11 @@
 #extension GL_EXT_buffer_reference2 : enable
 #extension GL_EXT_scalar_block_layout : enable
 
+#if USE_EXT_MESH_SHADER
+#extension GL_EXT_mesh_shader : require
+#else
 #extension GL_NV_mesh_shader : require
+#endif
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
@@ -96,12 +86,21 @@ layout(scalar, binding = BINDINGS_TESSTABLE_UBO, set = 0) uniform tessTableBuffe
 
 ////////////////////////////////////////////
 
+#if USE_EXT_MESH_SHADER
+struct TaskExchange {
+#else
 out taskNV TaskExchange {
+#endif
   uint16_t  batchStartCount[SUBGROUP_SIZE];
   uint16_t  prefixsumTriangles[SUBGROUP_SIZE];
   uint16_t  prefixsumVertices[SUBGROUP_SIZE];
   uint      baseIndex;
+#if USE_EXT_MESH_SHADER
+};
+taskPayloadSharedEXT TaskExchange TASK;
+#else
 } TASK;
+#endif
 
 ////////////////////////////////////////////
 
@@ -113,12 +112,16 @@ void main()
 
   // figure out which tessellated partial triangles
   // this workgroup operates on.
-  uint partIndex = gl_WorkGroupID.x * SUBGROUP_SIZE + gl_SubgroupInvocationID;
+#if USE_EXT_MESH_SHADER
+  // EXT task shader's launch grid can overshoot actual work
+  uint workGroupID = getWorkGroupIndexLinearized(gl_WorkGroupID);
+#else
+  uint workGroupID = gl_WorkGroupID.x;
+#endif
+  uint partBase  = workGroupID * SUBGROUP_SIZE;
+  uint partIndex = partBase + gl_SubgroupInvocationID;
   uint partTotalCount = build.partTriangleCounter;
-  uint partLocalCount = min(partTotalCount, gl_WorkGroupID.x * SUBGROUP_SIZE + SUBGROUP_SIZE) - gl_WorkGroupID.x * SUBGROUP_SIZE;
-  
-  // grab the data
-  TessTriangleInfo tessInfo = build.partTriangles.d[partIndex];
+  uint partLocalCount = min(partTotalCount, partBase + SUBGROUP_SIZE) - min(partTotalCount, partBase);
   
   uint cfg          = 0;
   uint numVertices  = TESS_RASTER_BATCH_VERTICES;
@@ -128,7 +131,7 @@ void main()
   // and the number of vertices/triangles it would use
   if (partIndex < partTotalCount)
   {
-    cfg          = tessInfo.subTriangle.triangleID_config >> 16;
+    cfg          = build.partTriangles.d[partIndex].subTriangle.triangleID_config >> 16;
     numVertices  = tess_getConfigVertexCount(cfg);
     numTriangles = tess_getConfigTriangleCount(cfg);
   }
@@ -209,8 +212,13 @@ void main()
   }
   
   if (gl_SubgroupInvocationID == 0){
-    TASK.baseIndex = gl_WorkGroupID.x * SUBGROUP_SIZE;
+    TASK.baseIndex = partBase;
     atomicAdd(readback.numBlasClusters, batchIndex);
+#if !USE_EXT_MESH_SHADER
     gl_TaskCountNV = batchIndex;
+#endif
   }
+#if USE_EXT_MESH_SHADER
+  EmitMeshTasksEXT(batchIndex, 1, 1);
+#endif
 }

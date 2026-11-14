@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /*
 
@@ -106,8 +92,13 @@ bool intersectHiz(vec4 clipMin, vec4 clipMax)
   float maxsize = max(size.x, size.y) * viewLast.hizSizeMax;
   float miplevel = ceil(log2(maxsize));
 
-  float depth = textureLod(texHizFar, ((clipMin.xy + clipMax.xy)*0.5),miplevel).r;
-  bool result = clipMin.z <= depth + c_depthNudge;
+  // center at most on the mip's last valid texel, so the 2x2 footprint stays on texels the build wrote
+  float mipsize = viewLast.hizSizeMax * exp2(-max(miplevel, 0.0));
+  vec2  uv      = min((clipMin.xy + clipMax.xy) * 0.5, (ceil(viewLast.hizSizeFactors.zw * mipsize) - 1.0) / mipsize);
+
+  float depth = textureLod(texHizFar, uv, miplevel).r;
+  // reversed-Z, the hiz stores the farthest depth, which is the smallest value
+  bool result = clipMax.z >= depth - c_depthNudge;
 
   return result;
 }

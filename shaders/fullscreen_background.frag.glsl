@@ -1,14 +1,7 @@
 /*
-* SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-* SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-*
-* NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-* property and proprietary rights in and to this material, related
-* documentation and any modifications thereto. Any use, reproduction,
-* disclosure or distribution of this material and related documentation
-* without an express license agreement from NVIDIA CORPORATION or
-* its affiliates is strictly prohibited.
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #version 460
 #extension GL_GOOGLE_include_directive : enable
@@ -23,6 +16,9 @@
 #extension GL_EXT_fragment_shader_barycentric : enable
 
 #include "shaderio.h"
+#if USE_DLSS
+#include "dlss_util.h"
+#endif
 #include "nvshaders/sky_functions.h.slang"
 
 layout(scalar, binding = BINDINGS_FRAME_UBO, set = 0) uniform frameConstantsBuffer
@@ -33,6 +29,9 @@ layout(scalar, binding = BINDINGS_FRAME_UBO, set = 0) uniform frameConstantsBuff
 ///////////////////////////////////////////////////
 
 layout(location = 0, index = 0) out vec4 out_Color;
+#if USE_DLSS
+layout(location = 1, index = 0) out vec2 out_DlssMotion;
+#endif
 
 ///////////////////////////////////////////////////
 
@@ -46,4 +45,9 @@ void main()
   vec3 skyColor = evalSimpleSky(view.skyParams, rayDir);
 
   out_Color = vec4(skyColor, 1);
+
+#if USE_DLSS
+  vec3 worldPos  = view.viewMatrixI[3].xyz + rayDir * view.farPlane * 0.99;
+  out_DlssMotion = calculateMotionVector(worldPos, view.viewProjMatrixPrev, view.viewProjMatrix, view.viewportf);
+#endif
 }

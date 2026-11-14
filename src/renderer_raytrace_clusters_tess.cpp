@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include <volk.h>
 
@@ -49,24 +35,30 @@ public:
 private:
   bool initShaders(Resources& res, Scene& scene, const RendererConfig& config);
 
+  // the render target, followed by the DLSS guide buffers when DLSS-RR is active
+  static constexpr uint32_t RENDER_TARGET_COUNT = 6;
+
+  void     getRenderTargetInfos(Resources& res, VkDescriptorImageInfo* infos) const;
+  uint32_t getRenderTargetCount() const;
+
   bool initRayTracingScene(Resources& res, Scene& scene, const RendererConfig& config);
 
   void initRayTracingPipeline(Resources& res);
 
   struct Shaders
   {
-    shaderc::SpvCompilationResult rayGen;
-    shaderc::SpvCompilationResult rayClosestHit;
-    shaderc::SpvCompilationResult rayMiss;
-    shaderc::SpvCompilationResult rayMissAO;
-    shaderc::SpvCompilationResult computeInstancesClassify;
-    shaderc::SpvCompilationResult computeClustersCull;
-    shaderc::SpvCompilationResult computeClusterClassify;
-    shaderc::SpvCompilationResult computeTriangleInstantiate;
-    shaderc::SpvCompilationResult computeTriangleSplit;
-    shaderc::SpvCompilationResult computeBlasClustersInsert;
-    shaderc::SpvCompilationResult computeBlasSetup;
-    shaderc::SpvCompilationResult computeBuildSetup;
+    Shader rayGen;
+    Shader rayClosestHit;
+    Shader rayMiss;
+    Shader rayMissAO;
+    Shader computeInstancesClassify;
+    Shader computeClustersCull;
+    Shader computeClusterClassify;
+    Shader computeTriangleInstantiate;
+    Shader computeTriangleSplit;
+    Shader computeBlasClustersInsert;
+    Shader computeBlasSetup;
+    Shader computeBuildSetup;
   };
 
   struct Pipelines
@@ -98,6 +90,7 @@ private:
 
   uint32_t m_maxGeneratedClusters = 0;
   uint32_t m_maxVisibleClusters   = 0;
+  uint32_t m_transient2xBatchSize = 0;
 
   bool m_buildTlas = true;
 
@@ -122,8 +115,17 @@ bool RendererRayTraceClustersTess::initShaders(Resources& res, Scene& scene, con
   options.AddMacroDefinition("TESSTABLE_LOOKUP_SIZE", fmt::format("{}", m_tessTable.m_maxSizeConfigs));
   options.AddMacroDefinition("TARGETS_RASTERIZATION", fmt::format("{}", 0));
   options.AddMacroDefinition("TESS_USE_PN", fmt::format("{}", config.pnDisplacement ? 1 : 0));
-  options.AddMacroDefinition("TESS_USE_1X_TRANSIENTBUILDS", fmt::format("{}", config.transientClusters1X ? 1 : 0));
-  options.AddMacroDefinition("TESS_USE_2X_TRANSIENTBUILDS", fmt::format("{}", config.transientClusters2X ? 1 : 0));
+  options.AddMacroDefinition("TESS_USE_1X_TRANSIENTBUILDS",
+                             fmt::format("{}", config.useTransientBuilds() && config.lowTessClusters1X ? 1 : 0));
+  options.AddMacroDefinition("TESS_USE_2X_TRANSIENTBUILDS",
+                             fmt::format("{}", config.useTransientBuilds() && config.lowTessClusters2X ? 1 : 0));
+  options.AddMacroDefinition("TESS_USE_1X_COMBINEDTEMPLATES",
+                             fmt::format("{}", config.useCombinedTemplates() && config.lowTessClusters1X ? 1 : 0));
+  options.AddMacroDefinition("TESS_USE_2X_COMBINEDTEMPLATES",
+                             fmt::format("{}", config.useCombinedTemplates() && config.lowTessClusters2X ? 1 : 0));
+  options.AddMacroDefinition("TESS_COMBINED_1X_BATCHSIZE", fmt::format("{}", std::max(1u, m_tessTable.m_combined1xBatchSize)));
+  options.AddMacroDefinition("TESS_COMBINED_2X_BATCHSIZE", fmt::format("{}", std::max(1u, m_tessTable.m_combined2xBatchSize)));
+  options.AddMacroDefinition("TESS_TRANSIENT_2X_BATCHSIZE", fmt::format("{}", std::max(1u, m_transient2xBatchSize)));
   options.AddMacroDefinition("TESS_USE_PERSISTENT_KERNEL", fmt::format("{}", config.persistentKernel ? 1 : 0));
   options.AddMacroDefinition("TESS_MAX_SPLIT_FACTOR",
                              fmt::format("{}", std::max(2u, std::min(config.splitFactor, uint32_t(TESSTABLE_SIZE)))));
@@ -139,6 +141,8 @@ bool RendererRayTraceClustersTess::initShaders(Resources& res, Scene& scene, con
   options.AddMacroDefinition("DO_ANIMATION", fmt::format("{}", config.doAnimation ? 1 : 0));
   options.AddMacroDefinition("DEBUG_VISUALIZATION", fmt::format("{}", config.debugVisualization ? 1 : 0));
   options.AddMacroDefinition("TESS_GENERATE_HISTOGRAM", fmt::format("{}", config.generateHistogram ? 1 : 0));
+  options.AddMacroDefinition("USE_RENDER_STATS", fmt::format("{}", config.useRenderStats ? 1 : 0));
+  options.AddMacroDefinition("USE_DLSS", fmt::format("{}", config.useDlss ? 1 : 0));
 
   shaderc::CompileOptions optionsAO = options;
   options.AddMacroDefinition("RAYTRACING_PAYLOAD_INDEX", "0");
@@ -146,8 +150,8 @@ bool RendererRayTraceClustersTess::initShaders(Resources& res, Scene& scene, con
 
   res.compileShader(m_shaders.rayGen, VK_SHADER_STAGE_RAYGEN_BIT_KHR, "render_raytrace.rgen.glsl", &options);
   res.compileShader(m_shaders.rayClosestHit, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, "render_raytrace_clusters.rchit.glsl", &options);
-  res.compileShader(m_shaders.rayMiss, VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl", &options);
-  res.compileShader(m_shaders.rayMissAO, VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl", &optionsAO);
+  res.compileShader(m_shaders.rayMiss, VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl", &options, "primary");
+  res.compileShader(m_shaders.rayMissAO, VK_SHADER_STAGE_MISS_BIT_KHR, "render_raytrace.rmiss.glsl", &optionsAO, "ao");
   res.compileShader(m_shaders.computeInstancesClassify, VK_SHADER_STAGE_COMPUTE_BIT, "instances_classify.comp.glsl", &options);
   res.compileShader(m_shaders.computeClustersCull, VK_SHADER_STAGE_COMPUTE_BIT, "clusters_cull.comp.glsl", &options);
   res.compileShader(m_shaders.computeTriangleInstantiate, VK_SHADER_STAGE_COMPUTE_BIT,
@@ -155,7 +159,18 @@ bool RendererRayTraceClustersTess::initShaders(Resources& res, Scene& scene, con
   res.compileShader(m_shaders.computeBlasClustersInsert, VK_SHADER_STAGE_COMPUTE_BIT, "blas_clusters_insert.comp.glsl", &options);
   res.compileShader(m_shaders.computeBlasSetup, VK_SHADER_STAGE_COMPUTE_BIT, "blas_setup_insertion.comp.glsl", &options);
   res.compileShader(m_shaders.computeBuildSetup, VK_SHADER_STAGE_COMPUTE_BIT, "build_setup.comp.glsl", &options);
-  res.compileShader(m_shaders.computeClusterClassify, VK_SHADER_STAGE_COMPUTE_BIT, "cluster_classify.comp.glsl", &options);
+  // each low tessellation optimization has its own classification kernel, this keeps the
+  // amount of permutations per file manageable and makes the files diffable against each other
+  const char* clusterClassifyShader = "cluster_classify.comp.glsl";
+  if(config.useTransientBuilds())
+  {
+    clusterClassifyShader = "cluster_classify_transient_lowtess.comp.glsl";
+  }
+  else if(config.useCombinedTemplates())
+  {
+    clusterClassifyShader = "cluster_classify_combined_lowtess.comp.glsl";
+  }
+  res.compileShader(m_shaders.computeClusterClassify, VK_SHADER_STAGE_COMPUTE_BIT, clusterClassifyShader, &options);
   res.compileShader(m_shaders.computeTriangleSplit, VK_SHADER_STAGE_COMPUTE_BIT, "triangle_split.comp.glsl", &options);
 
   if(!res.verifyShaders(m_shaders))
@@ -170,21 +185,17 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
 {
   m_config = config;
 
+#if USE_DLSS
+  res.setFramebufferDlss(m_config.useDlss ? Resources::DlssMode::eRayReconstruction : Resources::DlssMode::eNone,
+                         m_config.dlssQuality);
+  // falls back to native rendering if DLSS-RR failed to initialize
+  m_config.useDlss = m_config.useDlss && res.m_frameBuffer.dlssMode == Resources::DlssMode::eRayReconstruction;
+#else
+  m_config.useDlss = false;
+#endif
+
   m_maxGeneratedClusters = (1u << config.numVisibleClusterBits) + (1 << config.numPartTriangleBits);
   m_maxVisibleClusters   = 1u << config.numVisibleClusterBits;
-
-  m_tessTable.init(res, true, m_config.positionTruncateBits);
-  m_resourceReservedUsage.rtTemplateMemBytes += m_tessTable.m_templateData.bufferSize;
-  m_resourceReservedUsage.operationsMemBytes += m_tessTable.m_templateAddresses.bufferSize;
-  m_resourceReservedUsage.operationsMemBytes += m_tessTable.m_templateInstantiationSizes.bufferSize;
-
-  if(!initShaders(res, scene, config))
-  {
-    m_tessTable.deinit(res);
-    return false;
-  }
-
-  initBasics(res, scene, config);
 
   VkPhysicalDeviceProperties2 prop2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &m_rtProperties};
   VkPhysicalDeviceClusterAccelerationStructurePropertiesNV propCluster{
@@ -192,6 +203,64 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
   propCluster.pNext = &m_rtProperties;
   prop2.pNext       = &propCluster;
   vkGetPhysicalDeviceProperties2(res.m_physicalDevice, &prop2);
+
+  // The batches of the low tessellation optimizations may be bigger than the scene's own clusters,
+  // up to what the device supports. Both mechanisms use 8-bit indices, which limits them to
+  // 256 vertices no matter how many the device would allow per cluster.
+  const uint32_t maxBatchVertices  = std::min(propCluster.maxVerticesPerCluster, 256u);
+  const uint32_t maxBatchTriangles = propCluster.maxTrianglesPerCluster;
+
+  // A "2x" batch element stores 4 triangles and 6 vertices. The batching operates within a
+  // subgroup, which is also why the batch size must be a power of two.
+  auto clamp2xBatchSize = [&](uint32_t batchSize) {
+    batchSize = std::clamp(batchSize, 1u, std::min(maxBatchVertices / TESS_2X_VERTICES, maxBatchTriangles / TESS_2X_TRIANGLES));
+    batchSize = std::min(batchSize, 32u);
+    return 1u << uint32_t(std::log2(float(batchSize)));
+  };
+
+  m_transient2xBatchSize = 0;
+  if(m_config.useTransientBuilds() && m_config.lowTessClusters2X)
+  {
+    m_transient2xBatchSize = clamp2xBatchSize(m_config.transient2xBatchSize);
+    if(m_transient2xBatchSize != m_config.transient2xBatchSize)
+    {
+      LOGI("transient batch size clamped to 2x: %d\n", m_transient2xBatchSize);
+    }
+  }
+
+  uint32_t combined1xBatchSize = 0;
+  uint32_t combined2xBatchSize = 0;
+  if(m_config.useCombinedTemplates())
+  {
+    // a "1x" batch element stores 1 triangle and 3 vertices
+    combined1xBatchSize = std::clamp(m_config.combined1xBatchSize, 1u, std::min(maxBatchVertices / 3, maxBatchTriangles));
+    combined2xBatchSize = clamp2xBatchSize(m_config.combined2xBatchSize);
+
+    // only the actually enabled families need templates
+    combined1xBatchSize = m_config.lowTessClusters1X ? combined1xBatchSize : 1;
+    combined2xBatchSize = m_config.lowTessClusters2X ? combined2xBatchSize : 1;
+
+    if(combined1xBatchSize != m_config.combined1xBatchSize || combined2xBatchSize != m_config.combined2xBatchSize)
+    {
+      LOGI("combined template batch sizes clamped to 1x: %d, 2x: %d\n", combined1xBatchSize, combined2xBatchSize);
+    }
+  }
+
+  m_tessTable.init(res, true, m_config.positionTruncateBits, combined1xBatchSize, combined2xBatchSize);
+  m_resourceReservedUsage.rtTemplateMemBytes += m_tessTable.m_templateData.bufferSize;
+  m_resourceReservedUsage.operationsMemBytes += m_tessTable.m_templateAddresses.bufferSize;
+  m_resourceReservedUsage.operationsMemBytes += m_tessTable.m_templateInstantiationSizes.bufferSize;
+  m_resourceReservedUsage.rtTemplateMemBytes += m_tessTable.m_combinedTemplateData.bufferSize;
+  m_resourceReservedUsage.operationsMemBytes += m_tessTable.m_combinedTemplateAddresses.bufferSize;
+  m_resourceReservedUsage.operationsMemBytes += m_tessTable.m_combinedTemplateInstantiationSizes.bufferSize;
+
+  if(!initShaders(res, scene, m_config))
+  {
+    m_tessTable.deinit(res);
+    return false;
+  }
+
+  initBasics(res, scene, m_config);
 
   if(!initRayTracingScene(res, scene, config))
   {
@@ -224,7 +293,7 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
     m_sceneBuildShaderio.tempClusterAddresses = rangesBlas.append(sizeof(uint64_t) * m_maxGeneratedClusters, 8);
     m_sceneBuildShaderio.tempClusterSizes     = rangesBlas.append(sizeof(uint32_t) * m_maxGeneratedClusters, 4);
     m_sceneBuildShaderio.tempInstanceIDs      = rangesBlas.append(sizeof(uint32_t) * m_maxGeneratedClusters, 4);
-    if(m_config.transientClusters1X || m_config.transientClusters2X)
+    if(m_config.useTransientBuilds())
     {
       m_sceneBuildShaderio.transBuilds = rangesBlas.append(sizeof(shaderio::ClasBuildInfo) * m_maxGeneratedClusters, 16);
       m_sceneBuildShaderio.transClusterAddresses = rangesBlas.append(sizeof(uint64_t) * m_maxGeneratedClusters, 8);
@@ -245,7 +314,7 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
     m_sceneBuildShaderio.tempClusterAddresses += m_sceneBlasDataBuffer.address;
     m_sceneBuildShaderio.tempClusterSizes += m_sceneBlasDataBuffer.address;
     m_sceneBuildShaderio.tempInstanceIDs += m_sceneBlasDataBuffer.address;
-    if(m_config.transientClusters1X || m_config.transientClusters2X)
+    if(m_config.useTransientBuilds())
     {
       m_sceneBuildShaderio.transBuilds += m_sceneBlasDataBuffer.address;
       m_sceneBuildShaderio.transClusterAddresses += m_sceneBlasDataBuffer.address;
@@ -270,7 +339,7 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
         rangesScene.append(sizeof(shaderio::TessTriangleInfo) * uint32_t(1 << config.numPartTriangleBits), 16);
     m_sceneBuildShaderio.blasBuildInfos = rangesScene.append(sizeof(shaderio::BlasBuildInfo) * m_renderInstances.size(), 16);
     m_sceneBuildShaderio.blasBuildSizes = rangesScene.append(sizeof(uint32_t) * m_renderInstances.size(), 4);
-    if(m_config.transientClusters1X || m_config.transientClusters2X)
+    if(m_config.useTransientBuilds())
     {
       m_sceneBuildShaderio.basicClusterSizes = rangesScene.append(sizeof(uint32_t) * m_cluster.m_maxClusterSizes.size(), 4);
     }
@@ -286,14 +355,17 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
     m_sceneBuildShaderio.partTriangles += m_sceneDataBuffer.address;
     m_sceneBuildShaderio.blasBuildInfos += m_sceneDataBuffer.address;
     m_sceneBuildShaderio.blasBuildSizes += m_sceneDataBuffer.address;
-    if(m_config.transientClusters1X || m_config.transientClusters2X)
+    if(m_config.useTransientBuilds())
     {
       res.simpleUploadBuffer(m_sceneDataBuffer, m_sceneBuildShaderio.basicClusterSizes,
                              sizeof(uint32_t) * m_cluster.m_maxClusterSizes.size(), m_cluster.m_maxClusterSizes.data());
       m_sceneBuildShaderio.basicClusterSizes += m_sceneDataBuffer.address;
-
-      // alias this memory with existing
-      m_sceneBuildShaderio.transTriMappings = m_sceneBuildShaderio.partTriangles;
+    }
+    if(m_config.useLowtessParts())
+    {
+      // the low tessellation optimizations store their information
+      // at the back of the part triangles, alias this memory with existing
+      m_sceneBuildShaderio.lowtessTriMappings = m_sceneBuildShaderio.partTriangles;
     }
 
     // clas data buffer
@@ -326,6 +398,16 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
     bindings.addBinding(BINDINGS_HIZ_TEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, m_stageFlags);
     bindings.addBinding(BINDINGS_TLAS, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, m_stageFlags);
     bindings.addBinding(BINDINGS_RENDER_TARGET, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, m_stageFlags);
+#if USE_DLSS
+    if(m_config.useDlss)
+    {
+      // the DLSS guide buffers follow the render target
+      for(uint32_t i = 1; i < DlssDenoiser::eDlssCount; i++)
+      {
+        bindings.addBinding(BINDINGS_RENDER_TARGET + i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, m_stageFlags);
+      }
+    }
+#endif
     bindings.addBinding(BINDINGS_RAYTRACING_DEPTH, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, m_stageFlags);
 
     const uint32_t numDisplacedTextures = uint32_t(scene.m_textureImages.size());
@@ -347,10 +429,12 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
     writeSets.append(m_dsetPack.makeWrite(BINDINGS_HIZ_TEX), res.m_hizUpdate.farImageInfo);
     writeSets.append(m_dsetPack.makeWrite(BINDINGS_TLAS), m_tlas);
 
-    VkDescriptorImageInfo renderTargetInfo;
-    renderTargetInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    renderTargetInfo.imageView   = res.m_frameBuffer.imgColor.descriptor.imageView;
-    writeSets.append(m_dsetPack.makeWrite(BINDINGS_RENDER_TARGET), &renderTargetInfo);
+    VkDescriptorImageInfo renderTargetInfos[RENDER_TARGET_COUNT];
+    getRenderTargetInfos(res, renderTargetInfos);
+    for(uint32_t i = 0; i < getRenderTargetCount(); i++)
+    {
+      writeSets.append(m_dsetPack.makeWrite(BINDINGS_RENDER_TARGET + i), &renderTargetInfos[i]);
+    }
 
     writeSets.append(m_dsetPack.makeWrite(BINDINGS_RAYTRACING_DEPTH), res.m_frameBuffer.imgRaytracingDepth.descriptor);
 
@@ -374,36 +458,26 @@ bool RendererRayTraceClustersTess::init(Resources& res, Scene& scene, const Rend
 
   {
     VkComputePipelineCreateInfo compInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    VkShaderModuleCreateInfo    shaderInfo{};
-    compInfo.stage       = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    compInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    compInfo.stage.pNext = &shaderInfo;
-    compInfo.stage.pName = "main";
-    compInfo.layout      = m_pipelineLayout;
+    compInfo.stage                       = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    compInfo.stage.stage                 = VK_SHADER_STAGE_COMPUTE_BIT;
+    compInfo.stage.pName                 = "main";
+    compInfo.layout                      = m_pipelineLayout;
 
-    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeClustersCull);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeClustersCull);
+    res.createComputePipeline(compInfo, m_shaders.computeClustersCull, m_pipelines.computeClustersCull);
 
-    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeClusterClassify);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeClusterClassify);
+    res.createComputePipeline(compInfo, m_shaders.computeClusterClassify, m_pipelines.computeClusterClassify);
 
-    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeTriangleSplit);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeTriangleSplit);
+    res.createComputePipeline(compInfo, m_shaders.computeTriangleSplit, m_pipelines.computeTriangleSplit);
 
-    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeTriangleInstantiate);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeTriangleInstantiate);
+    res.createComputePipeline(compInfo, m_shaders.computeTriangleInstantiate, m_pipelines.computeTriangleInstantiate);
 
-    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeBlasSetup);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeBlasSetup);
+    res.createComputePipeline(compInfo, m_shaders.computeBlasSetup, m_pipelines.computeBlasSetup);
 
-    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeBlasClustersInsert);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeBlasClustersInsert);
+    res.createComputePipeline(compInfo, m_shaders.computeBlasClustersInsert, m_pipelines.computeBlasClustersInsert);
 
-    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeBuildSetup);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeBuildSetup);
+    res.createComputePipeline(compInfo, m_shaders.computeBuildSetup, m_pipelines.computeBuildSetup);
 
-    shaderInfo = nvvkglsl::GlslCompiler::makeShaderModuleCreateInfo(m_shaders.computeInstancesClassify);
-    vkCreateComputePipelines(res.m_device, nullptr, 1, &compInfo, nullptr, &m_pipelines.computeInstancesClassify);
+    res.createComputePipeline(compInfo, m_shaders.computeInstancesClassify, m_pipelines.computeInstancesClassify);
   }
 
   return true;
@@ -625,7 +699,7 @@ void RendererRayTraceClustersTess::render(VkCommandBuffer cmd, Resources& res, S
         cmdInfo.input       = inputs;
         vkCmdBuildClusterAccelerationStructureIndirectNV(cmd, &cmdInfo);
 
-        if(m_config.transientClusters1X || m_config.transientClusters2X)
+        if(m_config.useTransientBuilds())
         {
           //auto timerSection = profiler.cmdFrameSection(primary,"Clas Build");
 
@@ -655,8 +729,8 @@ void RendererRayTraceClustersTess::render(VkCommandBuffer cmd, Resources& res, S
 
           cmdInfo.srcInfosCount = m_sceneBuildBuffer.address + offsetof(shaderio::SceneBuilding, transBuildCounter);
 
-          // separate scratch space used to allow overlap with previous build
-          cmdInfo.scratchData = m_cluster.m_scratchBuffer.address + m_cluster.m_scratchSize;
+          // separate scratch range used to allow overlap with the instantiation
+          cmdInfo.scratchData = m_cluster.m_scratchBuffer.address + m_cluster.m_scratchTransientOffset;
           cmdInfo.input       = inputs;
           vkCmdBuildClusterAccelerationStructureIndirectNV(cmd, &cmdInfo);
         }
@@ -681,7 +755,7 @@ void RendererRayTraceClustersTess::render(VkCommandBuffer cmd, Resources& res, S
         vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &specialInstanceID);
         vkCmdDispatchIndirect(cmd, m_sceneBuildBuffer.buffer, offsetof(shaderio::SceneBuilding, dispatchBlasTempInsert));
 
-        if(m_config.transientClusters1X || m_config.transientClusters2X)
+        if(m_config.useTransientBuilds())
         {
           uint32_t specialInstanceID = 1;
           vkCmdPushConstants(cmd, m_pipelineLayout, m_stageFlags, 0, sizeof(uint32_t), &specialInstanceID);
@@ -772,6 +846,27 @@ void RendererRayTraceClustersTess::render(VkCommandBuffer cmd, Resources& res, S
     }
   }
 
+#if USE_DLSS
+  if(m_config.useDlss)
+  {
+    auto timerSection = profiler.cmdFrameSection(cmd, "DLSS-RR");
+
+    // ray tracing wrote the guide buffers, DLSS-RR writes the final color
+    memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+    res.cmdImageTransition(cmd, res.m_frameBuffer.imgColor, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+
+    // on failure the app disables DLSS before the next frame
+    if(!res.m_frameBuffer.dlssDenoiser.denoise(cmd, frame.frameConstants.jitter, frame.frameConstants.viewMatrix,
+                                               frame.frameConstants.projMatrix))
+    {
+      res.m_dlssEvaluateFailed = true;
+    }
+  }
+#endif
+
   {
     m_resourceActualUsage = m_resourceReservedUsage;
 
@@ -806,7 +901,7 @@ void RendererRayTraceClustersTess::deinit(Resources& res)
 
 bool RendererRayTraceClustersTess::initRayTracingScene(Resources& res, Scene& scene, const RendererConfig& config)
 {
-  if(!m_cluster.init(res, scene, config, &m_tessTable))
+  if(!m_cluster.init(res, scene, config, &m_tessTable, m_transient2xBatchSize))
   {
     return false;
   }
@@ -898,6 +993,7 @@ void RendererRayTraceClustersTess::initRayTracingPipeline(Resources& res)
   // Assemble the shader stages and recursion depth info into the ray tracing pipeline
   VkRayTracingPipelineCreateInfoKHR rayPipelineInfo{
       .sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+      .flags                        = res.getPipelineCreateFlags(),
       .stageCount                   = uint32_t(eShaderGroupCount),
       .pStages                      = stages.data(),
       .groupCount                   = static_cast<uint32_t>(shaderGroups.size()),
@@ -915,6 +1011,7 @@ void RendererRayTraceClustersTess::initRayTracingPipeline(Resources& res)
 
   NVVK_CHECK(vkCreateRayTracingPipelinesKHR(res.m_device, {}, {}, 1, &rayPipelineInfo, nullptr, &m_pipelines.rayTracing));
   NVVK_DBG_NAME(m_pipelines.rayTracing);
+  res.dumpPipelineInternals(m_pipelines.rayTracing, m_shaders.rayGen);
 
   // Creating the SBT
   {
@@ -954,19 +1051,47 @@ std::unique_ptr<Renderer> makeRendererRayTraceClustersTess()
   return std::make_unique<RendererRayTraceClustersTess>();
 }
 
+void RendererRayTraceClustersTess::getRenderTargetInfos(Resources& res, VkDescriptorImageInfo* infos) const
+{
+#if USE_DLSS
+  if(m_config.useDlss)
+  {
+    // render into the DLSS-RR input
+    for(uint32_t i = 0; i < DlssDenoiser::eDlssCount; i++)
+    {
+      infos[i] = res.m_frameBuffer.dlssDenoiser.getDescriptorImageInfo(DlssDenoiser::DlssBufferType(i));
+    }
+    return;
+  }
+#endif
+  infos[0]             = {};
+  infos[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  infos[0].imageView   = res.m_frameBuffer.imgColor.descriptor.imageView;
+}
+
+uint32_t RendererRayTraceClustersTess::getRenderTargetCount() const
+{
+#if USE_DLSS
+  if(m_config.useDlss)
+  {
+    return DlssDenoiser::eDlssCount;
+  }
+#endif
+  return 1;
+}
+
 void RendererRayTraceClustersTess::updatedFrameBuffer(Resources& res)
 {
-  std::array<VkWriteDescriptorSet, 3> writeSets;
+  nvvk::WriteSetContainer writeSets;
 
-  VkDescriptorImageInfo renderTargetInfo;
-  renderTargetInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-  renderTargetInfo.imageView   = res.m_frameBuffer.imgColor.descriptor.imageView;
-  writeSets[0]                 = m_dsetPack.makeWrite(BINDINGS_RENDER_TARGET);
-  writeSets[0].pImageInfo      = &renderTargetInfo;
-  writeSets[1]                 = m_dsetPack.makeWrite(BINDINGS_RAYTRACING_DEPTH);
-  writeSets[1].pImageInfo      = &res.m_frameBuffer.imgRaytracingDepth.descriptor;
-  writeSets[2]                 = m_dsetPack.makeWrite(BINDINGS_HIZ_TEX);
-  writeSets[2].pImageInfo      = &res.m_hizUpdate.farImageInfo;
+  VkDescriptorImageInfo renderTargetInfos[RENDER_TARGET_COUNT];
+  getRenderTargetInfos(res, renderTargetInfos);
+  for(uint32_t i = 0; i < getRenderTargetCount(); i++)
+  {
+    writeSets.append(m_dsetPack.makeWrite(BINDINGS_RENDER_TARGET + i), &renderTargetInfos[i]);
+  }
+  writeSets.append(m_dsetPack.makeWrite(BINDINGS_RAYTRACING_DEPTH), res.m_frameBuffer.imgRaytracingDepth.descriptor);
+  writeSets.append(m_dsetPack.makeWrite(BINDINGS_HIZ_TEX), res.m_hizUpdate.farImageInfo);
 
   vkUpdateDescriptorSets(res.m_device, uint32_t(writeSets.size()), writeSets.data(), 0, nullptr);
 

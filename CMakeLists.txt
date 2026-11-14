@@ -29,6 +29,7 @@ download_files(FILENAMES bunny_v2.zip EXTRACT)
 # Source files for this project
 #
 file(GLOB SOURCE_FILES src/*.*)
+list(FILTER SOURCE_FILES EXCLUDE REGEX "dlss*")
 file(GLOB SHADER_FILES shaders/*.glsl shaders/*.h)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/thirdparty)
@@ -52,6 +53,29 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 )
 
 #####################################################################################
+# Adding DLSS if selected
+option(USE_DLSS "Use DLSS for denoising/upscaling" ON)
+if(USE_DLSS)
+  set(DLSS_VERSION "310.9.1")
+  # FindNGX caches the include dir, it would keep the old headers after a version change.
+  # Only when we create the target, FindNGX does not set it again for an existing one.
+  if(NOT TARGET ngx)
+    unset(NGX_INCLUDE_DIR CACHE)
+  endif()
+  find_package(NGX REQUIRED)
+  target_link_libraries(${PROJECT_NAME} PRIVATE ngx)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE USE_DLSS)
+  target_sources(${PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_upscaler.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_upscaler.hpp
+  )
+endif()
+
+#####################################################################################
 # source groups
 
 
@@ -63,6 +87,7 @@ source_group("Source Files" FILES ${SOURCE_FILES})
 #
 add_project_definitions(${PROJECT_NAME})
 copy_to_runtime_and_install( ${PROJECT_NAME}
+    FILES ${DLSS_DLLS}
     NVSHADERS_FILES "${NVSHADERS_DIR}/nvshaders/slang_types.h"
                     "${NVSHADERS_DIR}/nvshaders/sky_io.h.slang"
                     "${NVSHADERS_DIR}/nvshaders/sky_functions.h.slang"

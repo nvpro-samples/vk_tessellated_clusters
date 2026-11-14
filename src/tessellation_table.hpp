@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #pragma once
 
@@ -51,9 +37,34 @@ public:
 
   uint32_t m_maxClusterSize = 0;
 
-  void init(Resources& res, bool withTemplates = false, uint32_t templatePositionTruncateBitCount = 0);
+  // "combined templates" store a batch of independent low-tessellated triangles within
+  // a single template, see `shaders/tessellation_combined.glsl`.
+  // The templates for batches of 1 to m_combined1xBatchSize independent triangles are
+  // stored first, followed by those for 1 to m_combined2xBatchSize independent 2x2x2 patches.
+  uint32_t m_combined1xBatchSize    = 0;
+  uint32_t m_combined2xBatchSize    = 0;
+  uint32_t m_combinedMaxVertices    = 0;
+  uint32_t m_combinedMaxTriangles   = 0;
+  uint32_t m_combinedMaxClusterSize = 0;
+
+  nvvk::Buffer m_combinedTemplateAddresses;
+  nvvk::Buffer m_combinedTemplateInstantiationSizes;
+  nvvk::Buffer m_combinedTemplateData;
+
+  void init(Resources& res,
+            bool       withTemplates                    = false,
+            uint32_t   templatePositionTruncateBitCount = 0,
+            uint32_t   combined1xBatchSize              = 0,
+            uint32_t   combined2xBatchSize              = 0);
   void initTemplates(Resources& res, uint32_t positionTruncateBitCount);
+  void initCombinedTemplates(Resources& res, uint32_t positionTruncateBitCount);
   void deinit(Resources& res);
+
+  // number of triangles and vertices that a "combined template" batch of `n` elements uses
+  static uint32_t getCombined1xTriangles(uint32_t n) { return n; }
+  static uint32_t getCombined1xVertices(uint32_t n) { return n * 3; }
+  static uint32_t getCombined2xTriangles(uint32_t n) { return n * TESS_2X_TRIANGLES; }
+  static uint32_t getCombined2xVertices(uint32_t n) { return n * TESS_2X_VERTICES; }
 
   uint32_t getLookupIndex(uint32_t x, uint32_t y, uint32_t z) const
   {

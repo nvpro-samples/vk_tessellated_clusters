@@ -1,0 +1,19 @@
+# Deliberately undersized budgets combined with a high tessellation rate, so that every
+# allocation in the build pipeline runs out of space. The sample is expected to clamp and
+# keep rendering whatever still fits, rather than to build out of bounds.
+#
+# Each budget is starved on its own first, so a failure points at a single counter,
+# afterwards they are starved together and in the other low tessellation modes,
+# because those store their data at the back of the part triangle array.
+
+SEQUENCE "reference"        --sequenceframes 8 --sequenceresetframes 2 --renderer 1 --lowtessmode 1 --tessrate 2
+SEQUENCE "oom_parts"        --partbits 12
+SEQUENCE "oom_vertices"     --partbits 20 --vertexbits 16
+SEQUENCE "oom_clasdata"     --vertexbits 24 --clustermegs 16
+SEQUENCE "oom_splits"       --clustermegs 1024 --splitbits 6 --tessrate 1
+SEQUENCE "oom_everything"   --partbits 12 --vertexbits 16 --clustermegs 16 --splitbits 6
+SEQUENCE "oom_transient"    --lowtessmode 0
+SEQUENCE "oom_none"         --lowtess1x 0 --lowtess2x 0
+SEQUENCE "oom_1x_only"      --lowtessmode 1 --lowtess1x 1 --lowtess2x 0
+SEQUENCE "oom_2x_only"      --lowtess1x 0 --lowtess2x 1
+SEQUENCE "recovered"        --lowtess1x 1 --partbits 20 --vertexbits 24 --clustermegs 1024 --splitbits 16

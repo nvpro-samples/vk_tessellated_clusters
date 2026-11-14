@@ -1,0 +1,11 @@
+# Covers the three cluster classification kernels and all of their permutations.
+# Every low tessellation optimization has to survive with and without its partner.
+
+SEQUENCE "none"             --sequenceframes 8 --sequenceresetframes 2 --renderer 1 --lowtess1x 0 --lowtess2x 0
+SEQUENCE "transient_1x"     --lowtessmode 0 --lowtess1x 1 --lowtess2x 0
+SEQUENCE "transient_2x"     --lowtess1x 0 --lowtess2x 1
+SEQUENCE "transient_both"   --lowtess1x 1 --lowtess2x 1
+SEQUENCE "combined_1x"      --lowtessmode 1 --lowtess1x 1 --lowtess2x 0
+SEQUENCE "combined_2x"      --lowtess1x 0 --lowtess2x 1
+SEQUENCE "combined_both"    --lowtess1x 1 --lowtess2x 1
+SEQUENCE "back_to_none"     --lowtess1x 0 --lowtess2x 0

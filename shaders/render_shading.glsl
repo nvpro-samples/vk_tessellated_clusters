@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #extension GL_EXT_fragment_shader_barycentric : enable
 
@@ -41,7 +27,11 @@ vec4 clusterShading(uint clusterID)
   return vec4(unpackUnorm4x8(murmurHash(clusterID ^ view.colorXor)).xyz * 0.9 + 0.1, 1);
 }
 
-vec4 shading(uint instanceID, vec3 wPos, vec3 wNormal, uint clusterID, float overheadLight, float ambientOcclusion)
+vec4 shading(uint instanceID, vec3 wPos, vec3 wNormal, uint clusterID, float overheadLight, float ambientOcclusion
+#if USE_DLSS_GUIDE_BUFFERS
+  , out vec4 dlssAlbedo, out vec3 dlssSpecular, out vec4 dlssNormalRoughness
+#endif
+)
 {
   const vec3 sunColor       = vec3(0.99f, 1.f, 0.71f);
   const vec3 skyColor       = view.skyParams.skyColor;
@@ -57,6 +47,13 @@ vec4 shading(uint instanceID, vec3 wPos, vec3 wNormal, uint clusterID, float ove
   vec3 normal  = normalize(wNormal.xyz);
   vec3 wEyePos = vec3(view.viewMatrixI[3].x, view.viewMatrixI[3].y, view.viewMatrixI[3].z);
   vec3 eyeDir  = normalize(wEyePos.xyz - wPos.xyz);
+
+#if USE_DLSS_GUIDE_BUFFERS
+  const float roughness = 0.4f;
+  dlssAlbedo            = vec4(materialAlbedo, 0);
+  dlssNormalRoughness   = vec4(normal, roughness);
+  dlssSpecular          = EnvBRDFApprox2(vec3(1), roughness, dot(normal, eyeDir));
+#endif
 
   // Ambient
   float ambientIntensity = 1.f;
@@ -98,7 +95,8 @@ vec4 shading(uint instanceID, vec3 wPos, vec3 wNormal, uint clusterID, float ove
 
 uint64_t packPickingValue(uint32_t v, float z)
 {
-  z         = 1.f - clamp(z, 0.f, 1.f);
+  // reversed-Z, the nearest has the highest value
+  z         = clamp(z, 0.f, 1.f);
   uint bits = floatBitsToUint(z);
   bits ^= (int(bits) >> 31) | 0x80000000u;
   uint64_t value = (uint64_t(bits) << 32) | uint64_t(v);
@@ -207,9 +205,27 @@ void computeDefaultBasis(const vec3 z, out vec3 x, out vec3 y)
 #ifndef M_PI
 #define M_PI 3.141592653589
 #endif
+uint xxhash32(uvec3 p)
+{
+  const uvec4 primes = uvec4(2246822519U, 3266489917U, 668265263U, 374761393U);
+  uint        h32;
+  h32 = p.z + primes.w + p.x * primes.y;
+  h32 = primes.z * ((h32 << 17) | (h32 >> (32 - 17)));
+  h32 += p.y * primes.y;
+  h32 = primes.z * ((h32 << 17) | (h32 >> (32 - 17)));
+  h32 = primes.x * (h32 ^ (h32 >> 15));
+  h32 = primes.y * (h32 ^ (h32 >> 13));
+  return h32 ^ (h32 >> 16);
+}
+
 float ambientOcclusion(vec3 wPos, vec3 wNormal, uint32_t sampleCount, float radius)
 {
+#if USE_DLSS
+  // DLSS-RR accumulates over time, hence the noise has to change every frame
+  uint32_t seed = xxhash32(uvec3(gl_LaunchIDEXT.x, gl_LaunchIDEXT.y, view.frame));
+#else
   uint32_t seed = wangHash(gl_LaunchIDEXT.x) ^ wangHash(gl_LaunchIDEXT.y);
+#endif
   vec3     z    = wNormal;
   vec3     x, y;
   computeDefaultBasis(z, x, y);

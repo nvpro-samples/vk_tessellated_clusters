@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2022-2025, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2022-2025, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #version 460
 
@@ -123,6 +109,9 @@ void main()
   
   float flayer = float(layer);
   
+  // clamp once, so the +1 taps reach the last row and column
+  coord = min(coord, srcSize.zw);
+  
 #if NV_HIZ_IS_FIRST && NV_HIZ_MSAA_SAMPLES
   #if NV_HIZ_REVERSED_Z
   float zMin = 0;
@@ -132,10 +121,10 @@ void main()
   float zMax = 0;
   #endif
   for (int i = 0; i < NV_HIZ_MSAA_SAMPLES; i++){
-    vec4 zRead = vec4(texelFetch(texDepth, IACCESS(min(coord + ivec2(0,0), srcSize.zw), layer), i).r,
-                      texelFetch(texDepth, IACCESS(min(coord + ivec2(1,0), srcSize.zw), layer), i).r,
-                      texelFetch(texDepth, IACCESS(min(coord + ivec2(0,1), srcSize.zw), layer), i).r,
-                      texelFetch(texDepth, IACCESS(min(coord + ivec2(1,1), srcSize.zw), layer), i).r);
+    vec4 zRead = vec4(texelFetch(texDepth, IACCESS(coord + ivec2(0,0), layer), i).r,
+                      texelFetch(texDepth, IACCESS(coord + ivec2(1,0), layer), i).r,
+                      texelFetch(texDepth, IACCESS(coord + ivec2(0,1), layer), i).r,
+                      texelFetch(texDepth, IACCESS(coord + ivec2(1,1), layer), i).r);
     zMin = minOp(zMin, minOp(minOp(minOp(zRead.x, zRead.y),zRead.z),zRead.w));
     zMax = maxOp(zMax, maxOp(maxOp(maxOp(zRead.x, zRead.y),zRead.z),zRead.w));
   }
@@ -146,7 +135,6 @@ void main()
     #define texRead texNear
   #endif
 
-  coord = min(coord, srcSize.zw);
   vec4 zRead = vec4(texelFetchOffset(texRead, IACCESS(coord, layer), startLod, ivec2(0,0)).r,
                     texelFetchOffset(texRead, IACCESS(coord, layer), startLod, ivec2(1,0)).r,
                     texelFetchOffset(texRead, IACCESS(coord, layer), startLod, ivec2(0,1)).r,

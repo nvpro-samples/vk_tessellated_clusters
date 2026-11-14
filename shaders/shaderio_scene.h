@@ -1,21 +1,7 @@
 /*
-* Copyright (c) 2024-2026, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #ifndef _SHADERIO_SCENE_H_
 #define _SHADERIO_SCENE_H_
@@ -84,6 +70,13 @@ struct TessellationTable
   BUFFER_REF(uint64s_in) templateAddresses;
   // as well as their worst-case instantiation size, so we can estimate the size of the resulting CLAS
   BUFFER_REF(uint32s_in) templateInstantiationSizes;
+
+  // Templates that combine multiple independent low-tessellated triangles within a single CLAS.
+  // The array is indexed via `tessc_getCombinedTemplateIndex`, it stores the templates for
+  // batches of 1 to TESS_COMBINED_1X_BATCHSIZE independent triangles, followed by the templates
+  // for batches of 1 to TESS_COMBINED_2X_BATCHSIZE independent 2x2x2 patches.
+  BUFFER_REF(uint64s_in) combinedTemplateAddresses;
+  BUFFER_REF(uint32s_in) combinedTemplateInstantiationSizes;
 };
 
 struct BBox
@@ -117,6 +110,7 @@ struct RenderInstance
 {
   // spatial information for the object
   mat4 worldMatrix;
+  mat4 worldMatrixI;
 
   // The geometry information
   // We avoided another indirection into a unique geometry array

@@ -1,24 +1,11 @@
 /*
-* Copyright (c) 2024-2025, NVIDIA CORPORATION.  All rights reserved.
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION.
-* SPDX-License-Identifier: Apache-2.0
-*/
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 /*
-  When building transient clusters we store meta information at the end
+  When building transient clusters, or when instantiating combined templates,
+  we store the low tessellation information at the end
   of the build.partTriangles array, while "real" tessellation info
   for triangles are stored at the front.
 
@@ -26,48 +13,61 @@
 
   a single u64 encodes
   lower 32bit:  actual partTriangles (same as if the feature wasn't used)
-  higher 32bit: back of partTriangles array contains meta data for transient clusters
+  higher 32bit: back of partTriangles array contains the data for those clusters
 
 */
 
 // reading the counter is only relevant for actual partTriangles
 uint buildRW_partTriangleCounter()
 {
-#if TESS_USE_TRANSIENTBUILDS
+#if TESS_USE_LOWTESS_PARTS
   return unpackUint2x32(buildRW.dualPartTriangleCounter).x;
 #else
   return buildRW.partTriangleCounter;
 #endif
 }
 
-uint buildRW_partTriangleCounterTransient()
+uint buildRW_partTriangleCounterLowtess()
 {
-#if TESS_USE_TRANSIENTBUILDS
+#if TESS_USE_LOWTESS_PARTS
  return unpackUint2x32(buildRW.dualPartTriangleCounter).y;
 #else
   return 0;
 #endif
 }
 
-#if TESS_USE_TRANSIENTBUILDS
-
-uint build_atomicAdd_partTriangleCounterTransient(uint transientParts)
+// The front of the array can only grow until it meets the information
+// that is stored at the back. Both counters may exceed the limits when we
+// run out of space, hence clamp the number of usable part triangles.
+uint buildRW_partTriangleCounterClamped()
 {
-  uint64_t res = atomicAdd(buildRW.dualPartTriangleCounter, packUint2x32(uvec2(0,transientParts)));
+#if TESS_USE_LOWTESS_PARTS
+  uvec2 unpacked = unpackUint2x32(buildRW.dualPartTriangleCounter);
+  return min(unpacked.x, uint(MAX_PART_TRIANGLES) - min(unpacked.y, uint(MAX_PART_TRIANGLES)));
+#else
+  return min(buildRW.partTriangleCounter, uint(MAX_PART_TRIANGLES));
+#endif
+}
+
+#if TESS_USE_LOWTESS_PARTS
+
+uint build_atomicAdd_partTriangleCounterLowtess(uint lowtessParts)
+{
+  uint64_t res = atomicAdd(buildRW.dualPartTriangleCounter, packUint2x32(uvec2(0,lowtessParts)));
   uvec2 unpacked = unpackUint2x32(res);
   
   // sum not within limit
   // return an out of bounds offset that will be rejected by code that uses the returned offset
-  if (unpacked.x + unpacked.y + transientParts + 1 > MAX_PART_TRIANGLES)
+  if (unpacked.x + unpacked.y + lowtessParts + 1 > MAX_PART_TRIANGLES)
     return MAX_PART_TRIANGLES;
   else
-    return uint(MAX_PART_TRIANGLES) - unpacked.y - transientParts;
+    return uint(MAX_PART_TRIANGLES) - unpacked.y - lowtessParts;
 }
 #endif
 
 uint build_atomicAdd_partTriangleCounter(uint partTriangles)
 {
-#if TESS_USE_TRANSIENTBUILDS
+#if TESS_USE_LOWTESS_PARTS
   uint64_t res = atomicAdd(buildRW.dualPartTriangleCounter, packUint2x32(uvec2(partTriangles,0)));
   uvec2 unpacked = unpackUint2x32(res);
   

@@ -1,0 +1,12 @@
+# DLSS super resolution in rasterization and ray reconstruction in ray tracing, they change
+# the render resolution, hence also cover switching the quality, supersampling and the renderer.
+
+SEQUENCE "raytrace_rr"        --sequenceframes 8 --sequenceresetframes 2 --renderer 1 --dlss 1 --dlssquality 2
+SEQUENCE "raytrace_rr_dlaa"   --dlssquality 5
+SEQUENCE "raytrace_rr_ss2"    --dlssquality 0 --supersample 2
+SEQUENCE "raster_sr"          --renderer 0
+SEQUENCE "raster_sr_ss1"      --supersample 1 --dlssquality 2
+SEQUENCE "raster_sr_animated" --animation 1 --culling 1
+SEQUENCE "raytrace_rr_animated" --renderer 1
+SEQUENCE "raytrace_rr_again"  --animation 0 --culling 0
+SEQUENCE "raytrace_native"    --dlss 0
